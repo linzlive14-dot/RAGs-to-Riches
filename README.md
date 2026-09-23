@@ -23,7 +23,16 @@ Run the API:
 uvicorn app.main:app --reload
 ```
 
-Then open <http://127.0.0.1:8000/health>. The expected response is:
+In a second terminal, run the Streamlit experience:
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+The UI includes workflow presets, cited policy cards, explicit mock-action
+confirmation, and an expandable operational trace. It calls the API configured
+by `HR_API_URL` (default `http://127.0.0.1:8000`). Open
+<http://127.0.0.1:8000/health> to check the API. The expected response is:
 
 ```json
 {"status":"ok","service":"RAGs to Riches","environment":"development"}
@@ -99,6 +108,24 @@ Results contain cited policy snippets and a concise operational trace with
 states, tool names, safe arguments, summaries, sources, and escalation status.
 The trace contains no hidden chain-of-thought. A mock ticket is never created
 unless both `create_ticket=True` and `confirmed=True` are supplied.
+
+The `POST /chat` endpoint accepts the same fields as `WorkflowRequest` and
+returns the complete answer, citations, trace, status, and optional mock action.
+
+## Evaluation and ablation
+
+Run the deterministic 25-task evaluation and the retrieval ablation:
+
+```bash
+python -m evaluation.runner
+```
+
+This writes `evaluation/report.json` with groundedness, citation,
+tool-selection, workflow, clarification, safety, and cold/warm p50/p95 latency
+metrics. `evaluation/ablation.json` compares three chunk sizes against three
+retrieval-k values and records source hit rate, grounded rate, and mean latency.
+Both generated reports are reproducible runtime artifacts and are ignored by
+Git.
 
 This repository is a software demonstration. Its synthetic policies are not
 legal, employment, medical, tax, or benefits advice.

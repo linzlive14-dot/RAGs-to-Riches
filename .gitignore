@@ -19,6 +19,8 @@ dist/
 htmlcov/
 data/*.sqlite3
 data/*.sqlite3-*
+evaluation/report.json
+evaluation/ablation.json
 
 # Editors and operating systems
 .DS_Store
