@@ -69,6 +69,30 @@ def test_remote_work_and_pto_workflows_use_mcp_tools() -> None:
     asyncio.run(scenario())
 
 
+def test_workflow_uses_configured_llm_synthesizer() -> None:
+    class FakeSynthesizer:
+        async def synthesize(self, evidence: dict[str, object]) -> str:
+            assert evidence["decision"] == "eligible_for_review"
+            return "Model-generated grounded guidance. [P1]"
+
+    async def scenario() -> None:
+        async with HRMCPClient() as client:
+            result = await HRAgent(client, synthesizer=FakeSynthesizer()).run(
+                WorkflowRequest(
+                    workflow="remote_work",
+                    employee_id="SYN-1001",
+                    requested_location_id="US-NY",
+                )
+            )
+            assert result.answer == "Model-generated grounded guidance. [P1]"
+            assert any(
+                step.state == "synthesize" and "configured LLM" in step.result_summary
+                for step in result.trace
+            )
+
+    asyncio.run(scenario())
+
+
 def test_workflow_clarifies_and_gates_mock_action_confirmation() -> None:
     async def scenario() -> None:
         async with HRMCPClient() as client:

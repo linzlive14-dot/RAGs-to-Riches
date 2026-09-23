@@ -12,6 +12,10 @@ class ToolClient(Protocol):
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]: ...
 
 
+class AnswerSynthesizer(Protocol):
+    async def synthesize(self, evidence: dict[str, Any]) -> str: ...
+
+
 class Workflow(StrEnum):
     REMOTE_WORK = "remote_work"
     PTO = "pto"
@@ -64,8 +68,13 @@ class WorkflowResult(BaseModel):
 class HRAgent:
     """Run fixed workflow states without exposing hidden model reasoning."""
 
-    def __init__(self, tools: ToolClient) -> None:
+    def __init__(
+        self,
+        tools: ToolClient,
+        synthesizer: AnswerSynthesizer | None = None,
+    ) -> None:
         self.tools = tools
+        self.synthesizer = synthesizer
 
     async def _call(
         self,
@@ -232,7 +241,7 @@ class HRAgent:
         decision = compliance["decision"]
         name = employee["employee"]["name"]
         if decision == "eligible_for_review":
-            answer = (
+            fallback_answer = (
                 f"{name} meets the automated prerequisites for {request.workflow.value.replace('_', ' ')} "
                 f"review, but manager/HR approval is still required. {references}"
             )
@@ -241,11 +250,36 @@ class HRAgent:
             failed = [
                 check["name"] for check in compliance.get("checks", []) if not check["passed"]
             ]
-            answer = (
+            fallback_answer = (
                 f"The request needs HR review because these checks did not pass: "
                 f"{', '.join(failed) or 'manual review required'}. {references}"
             )
             status = "escalated"
+
+        answer = fallback_answer
+        synthesis_summary = "Assembled cited guidance deterministically"
+        if self.synthesizer is not None:
+            evidence = {
+                "workflow": request.workflow.value,
+                "employee_name": name,
+                "decision": decision,
+                "checks": compliance.get("checks", []),
+                "citations": [citation.model_dump() for citation in citations],
+            }
+            try:
+                answer = await self.synthesizer.synthesize(evidence)
+                synthesis_summary = "Generated grounded guidance with the configured LLM"
+            except Exception:
+                synthesis_summary = (
+                    "LLM generation failed validation; used safe deterministic guidance"
+                )
+        trace.append(
+            TraceStep(
+                state=AgentState.SYNTHESIZE,
+                result_summary=synthesis_summary,
+                sources=[citation.source for citation in citations],
+            )
+        )
 
         mock_action: dict[str, Any] | None = None
         if request.create_ticket:
@@ -284,18 +318,11 @@ class HRAgent:
                     mock_action=mock_action,
                 )
 
-        trace.extend(
-            [
-                TraceStep(
-                    state=AgentState.SYNTHESIZE,
-                    result_summary="Assembled cited guidance from tool outputs",
-                    sources=[citation.source for citation in citations],
-                ),
-                TraceStep(
-                    state=AgentState.COMPLETE if status == "completed" else AgentState.ESCALATE,
-                    result_summary="Workflow completed without hidden reasoning",
-                ),
-            ]
+        trace.append(
+            TraceStep(
+                state=AgentState.COMPLETE if status == "completed" else AgentState.ESCALATE,
+                result_summary="Workflow completed without hidden reasoning",
+            )
         )
         return WorkflowResult(
             workflow=request.workflow,

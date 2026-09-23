@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from app.agent import HRAgent, WorkflowRequest, WorkflowResult
 from app.config import get_settings
+from app.llm import OpenRouterSynthesizer
 from hr_mcp.client import HRMCPClient
 
 
@@ -38,5 +39,13 @@ def health() -> HealthResponse:
 async def chat(request: WorkflowRequest) -> WorkflowResult:
     """Run one validated HR workflow through the real MCP client boundary."""
 
+    synthesizer = None
+    if settings.openrouter_api_key is not None:
+        synthesizer = OpenRouterSynthesizer(
+            settings.openrouter_api_key.get_secret_value(),
+            model=settings.openrouter_model,
+            base_url=settings.openrouter_base_url,
+            timeout_seconds=settings.openrouter_timeout_seconds,
+        )
     async with HRMCPClient() as tools:
-        return await HRAgent(tools).run(request)
+        return await HRAgent(tools, synthesizer=synthesizer).run(request)

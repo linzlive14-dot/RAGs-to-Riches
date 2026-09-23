@@ -1,9 +1,9 @@
 # RAGs to Riches
 
-A deterministic, MCP-backed HR policy assistant built entirely around fictional
+An MCP-backed HR policy assistant built entirely around fictional
 policies and synthetic employee records. It demonstrates cited retrieval,
 multi-step remote-work and PTO workflows, safe mock actions, operational traces,
-evaluation, and a test-gated deployment.
+grounded OpenRouter answer generation, evaluation, and a test-gated deployment.
 
 This is a software demonstration—not legal, employment, medical, tax, or
 benefits advice.
@@ -19,12 +19,15 @@ flowchart LR
     Client -->|stdio| Server[FastMCP server]
     Server --> Index[SQLite FTS5 policy index]
     Server --> Data[Synthetic JSON records]
-    Agent --> Output[Citations and operational trace]
+    Agent --> LLM[OpenRouter LLM]
+    LLM --> Output[Citations and operational trace]
 ```
 
 The orchestrator exposes states and tool activity, not hidden chain-of-thought.
-It uses deterministic retrieval and compliance rules; no external model or API
-key is required in the current implementation.
+Retrieval and compliance decisions remain deterministic. When
+`OPENROUTER_API_KEY` is configured, an LLM turns the validated evidence into
+the final cited answer. Invalid or unavailable model output falls back to safe
+deterministic wording.
 
 ## Run locally
 
@@ -39,6 +42,10 @@ python -m pip install --no-deps -e .
 cp .env.example .env
 python -m rag build
 ```
+
+Set `OPENROUTER_API_KEY` in `.env` to enable LLM-generated answers. You can
+optionally change `OPENROUTER_MODEL` from the default
+`inclusionai/ling-3.0-flash-vl:free` model. Never commit the key.
 
 Start the API and UI in separate terminals:
 

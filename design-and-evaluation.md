@@ -23,14 +23,16 @@ sequenceDiagram
     MCP->>Store: Read synthetic evidence
     Store-->>MCP: Records and ranked chunks
     MCP-->>Agent: Structured results
+    Agent->>Agent: Validate decision and generate wording via OpenRouter
     Agent-->>API: Answer, citations, trace
     API-->>UI: WorkflowResult
 ```
 
-The system is deterministic and does not currently invoke an LLM. This makes
-the workflows reproducible and avoids sending HR-shaped data to an external
-provider. The trade-off is that free-form intent classification and natural
-language generation are outside the current scope.
+Workflow selection, retrieval, compliance checks, and action gating are
+deterministic. With `OPENROUTER_API_KEY` configured, an external LLM generates
+the final wording from synthetic employee data, validated checks, and retrieved
+policy snippets. The model cannot change the workflow decision, and missing
+citations or provider failures trigger deterministic fallback text.
 
 ## Retrieval
 
@@ -40,9 +42,9 @@ make rebuilds reproducible. SQLite FTS5 supplies BM25 lexical ranking. Every
 result includes `document_id`, title, section, source, snippet, score, and chunk
 identifier.
 
-Answers are extractive, attach inline citation IDs, distinguish policy guidance
-from escalation, refuse unsupported questions, and block common
-instruction-override or secret-seeking prompts.
+Answers attach inline citation IDs, distinguish policy guidance from
+escalation, and constrain the model to validated evidence. Retrieved text is
+explicitly treated as untrusted data to reduce prompt-injection risk.
 
 ## API contracts
 
@@ -156,7 +158,8 @@ is small; changing them based only on timing noise would overfit this benchmark.
 
 The corpus has eight compact policies rather than a production-sized policy
 library. Lexical FTS5 retrieval replaces the originally considered embedding
-stack, and free-form LLM interpretation is absent. Evaluation is deterministic,
-small, and synthetic; perfect scores do not establish real-world quality.
+stack. The checked evaluation uses deterministic fallback wording and therefore
+does not measure model quality. It is small and synthetic; perfect scores do
+not establish real-world quality.
 Render free instances can cold-start, and the JSON ticket store is ephemeral
 and unsuitable for concurrent production writes.
