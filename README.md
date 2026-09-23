@@ -1,10 +1,32 @@
 # RAGs to Riches
 
-An agentic retrieval-augmented generation assistant for synthetic HR
-workflows. It includes a Python 3.12 API foundation, a fictional HR policy
-corpus, synthetic employee data, and deterministic policy retrieval.
+A deterministic, MCP-backed HR policy assistant built entirely around fictional
+policies and synthetic employee records. It demonstrates cited retrieval,
+multi-step remote-work and PTO workflows, safe mock actions, operational traces,
+evaluation, and a test-gated deployment.
 
-## Local setup
+This is a software demonstration—not legal, employment, medical, tax, or
+benefits advice.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Employee --> UI[Streamlit UI]
+    UI --> API[FastAPI /chat]
+    API --> Agent[Explicit state machine]
+    Agent --> Client[MCP client]
+    Client -->|stdio| Server[FastMCP server]
+    Server --> Index[SQLite FTS5 policy index]
+    Server --> Data[Synthetic JSON records]
+    Agent --> Output[Citations and operational trace]
+```
+
+The orchestrator exposes states and tool activity, not hidden chain-of-thought.
+It uses deterministic retrieval and compliance rules; no external model or API
+key is required in the current implementation.
+
+## Run locally
 
 Python 3.12 is required.
 
@@ -15,117 +37,90 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.lock
 python -m pip install --no-deps -e .
 cp .env.example .env
+python -m rag build
 ```
 
-Run the API:
+Start the API and UI in separate terminals:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-In a second terminal, run the Streamlit experience:
-
 ```bash
 streamlit run app/streamlit_app.py
 ```
 
-The UI includes workflow presets, cited policy cards, explicit mock-action
-confirmation, and an expandable operational trace. It calls the API configured
-by `HR_API_URL` (default `http://127.0.0.1:8000`). Open
-<http://127.0.0.1:8000/health> to check the API. The expected response is:
+Open <http://127.0.0.1:8501>. The API health endpoint is
+<http://127.0.0.1:8000/health>. To exercise the same single-service supervisor
+used in production, run `PORT=8501 python -m app.deploy`.
 
-```json
-{"status":"ok","service":"RAGs to Riches","environment":"development"}
-```
+## Use the chatbot
 
-Run the test suite:
+- Remote work: use `SYN-1001` and `US-NY` for an eligible-for-review result, or
+  `SYN-1003` and `US-TX` for an escalation.
+- PTO: use `SYN-1002` and `8` hours for an eligible-for-review result.
+- Mock action: select “Propose a mock HR ticket.” The first request asks for
+  confirmation; a ticket is written only after explicit confirmation.
 
-```bash
-pytest
-```
+Each result includes policy citation cards and an expandable trace of states,
+safe tool arguments, summaries, and source names.
 
-## Policy corpus and retrieval
+## Retrieval and MCP
 
-The eight fictional policies in `policies/` use Markdown and plain text.
-`policies/manifest.json` records their provenance and AI assistance. The JSON
-records in `mock_data/` are explicitly synthetic and use reserved
-`example.invalid` addresses.
-
-Build the local SQLite FTS5 index reproducibly:
-
-```bash
-python -m rag build
-```
-
-Search chunks or produce a guarded, extractive answer with inline citations:
+The eight-policy Markdown/TXT corpus and all JSON records are explicitly
+synthetic. `policies/manifest.json` records provenance and AI assistance.
+Heading-aware chunks use fixed overlap, stable SHA-256 identifiers, SQLite FTS5
+BM25 ranking, and deterministic tie-breaking.
 
 ```bash
 python -m rag search "fully remote tenure and location approval"
 python -m rag answer "Can I use PTO during parental leave?"
-```
-
-The index uses heading-aware word chunks with fixed overlap, stable SHA-256
-identifiers, BM25 ranking, and deterministic tie-breaking. Every result
-contains `document_id`, `title`, `section`, `source`, and `snippet` metadata.
-The answer path labels policy guidance, refuses unsupported questions without
-inventing citations, and rejects common instruction-override or secret-seeking
-queries. The generated `data/policy_index.sqlite3` is intentionally not
-committed; rebuilding it is the source of truth.
-
-## MCP tools and agent workflows
-
-Run the synthetic HR MCP server over stdio:
-
-```bash
 python -m hr_mcp.server
 ```
 
-It exposes seven discoverable tools for policy search and section retrieval,
-synthetic employee/PTO/benefits lookup, deterministic compliance checks, and
-confirmation-gated mock ticket creation. `HRMCPClient` is the only execution
-boundary used by `HRAgent`; the orchestrator does not call tool implementations
-directly.
+The seven MCP tools cover policy search/section retrieval, employee, PTO, and
+benefits lookups, compliance checks, and confirmation-gated ticket creation.
+The agent reaches all tool implementations through the MCP client boundary.
 
-The explicit state machine in `app/agent.py` supports `remote_work` and `pto`
-requests. Callers provide a validated `WorkflowRequest`, then run it inside an
-MCP client session:
-
-```python
-from app.agent import HRAgent, WorkflowRequest
-from hr_mcp import HRMCPClient
-
-async with HRMCPClient() as tools:
-    result = await HRAgent(tools).run(
-        WorkflowRequest(
-            workflow="remote_work",
-            employee_id="SYN-1001",
-            requested_location_id="US-NY",
-        )
-    )
-```
-
-Results contain cited policy snippets and a concise operational trace with
-states, tool names, safe arguments, summaries, sources, and escalation status.
-The trace contains no hidden chain-of-thought. A mock ticket is never created
-unless both `create_ticket=True` and `confirmed=True` are supplied.
-
-The `POST /chat` endpoint accepts the same fields as `WorkflowRequest` and
-returns the complete answer, citations, trace, status, and optional mock action.
-
-## Evaluation and ablation
-
-Run the deterministic 25-task evaluation and the retrieval ablation:
+## Test the application
 
 ```bash
+pytest
 python -m evaluation.runner
 ```
 
-This writes `evaluation/report.json` with groundedness, citation,
-tool-selection, workflow, clarification, safety, and cold/warm p50/p95 latency
-metrics. `evaluation/ablation.json` compares three chunk sizes against three
-retrieval-k values and records source hit rate, grounded rate, and mean latency.
-Both generated reports are reproducible runtime artifacts and are ignored by
-Git.
+The evaluation command writes local reports under `evaluation/`. Generated
+reports are ignored by Git.
 
-This repository is a software demonstration. Its synthetic policies are not
-legal, employment, medical, tax, or benefits advice.
+## Deploy to Render
+
+The included `render.yaml` runs the Streamlit UI, FastAPI API, MCP server,
+policy index, and synthetic data in one Python web service.
+
+1. Push the repository to GitHub.
+2. In Render, create a new Blueprint and select the repository. Render detects
+   `render.yaml`; apply the proposed `ragsto-riches` web service.
+3. Wait for the build to install dependencies and create the policy index.
+4. Open the service URL. Render checks `/_stcore/health` for readiness.
+
+The service starts with `python -m app.deploy`. Streamlit listens on Render's
+public `PORT`, while FastAPI listens on the private loopback port and is reached
+by the UI through `HR_API_URL`.
+
+Automatic Render deployments are disabled so releases can pass CI first. To
+enable deployment from GitHub Actions:
+
+1. Create a deploy hook in the Render service settings.
+2. Add `RENDER_DEPLOY_HOOK_URL` as a GitHub repository or `production`
+   environment secret.
+3. Add `DEPLOYED_APP_URL` with the public Render service origin, such as
+   `https://ragsto-riches.onrender.com`.
+4. Push to `main`.
+
+Pull requests and pushes to `main` run tests plus evaluation. A push to `main`
+triggers Render only after those checks pass, then polls the deployed health
+endpoint for up to ten minutes.
+
+Free-tier instances may sleep, so the first request can take longer while the
+service starts. Confirmed mock tickets use ephemeral local storage and may be
+cleared by a restart or deployment.

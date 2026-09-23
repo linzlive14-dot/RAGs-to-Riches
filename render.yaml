@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: ragsto-riches
+    runtime: python
+    plan: free
+    autoDeploy: false
+    buildCommand: >-
+      python -m pip install -r requirements.lock &&
+      python -m pip install --no-deps -e . &&
+      python -m rag build
+    startCommand: python -m app.deploy
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.11
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
