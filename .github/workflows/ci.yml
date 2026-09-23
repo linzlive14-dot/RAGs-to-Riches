@@ -54,19 +54,20 @@ jobs:
       RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
       DEPLOYED_APP_URL: ${{ secrets.DEPLOYED_APP_URL }}
     steps:
-      - name: Require deployment configuration
+      - name: Check deployment configuration
+        id: deployment
         run: |
-          test -n "$RENDER_DEPLOY_HOOK_URL" || {
-            echo "::error::RENDER_DEPLOY_HOOK_URL is not configured"
-            exit 1
-          }
-          test -n "$DEPLOYED_APP_URL" || {
-            echo "::error::DEPLOYED_APP_URL is not configured"
-            exit 1
-          }
+          if test -n "$RENDER_DEPLOY_HOOK_URL" && test -n "$DEPLOYED_APP_URL"; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Render deployment is disabled until both deployment secrets are configured"
+          fi
       - name: Trigger gated Render deployment
+        if: steps.deployment.outputs.enabled == 'true'
         run: curl --fail --show-error --silent --request POST "$RENDER_DEPLOY_HOOK_URL"
       - name: Wait for the deployed UI health check
+        if: steps.deployment.outputs.enabled == 'true'
         run: |
           for attempt in {1..40}; do
             if curl --fail --show-error --silent \
