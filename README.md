@@ -1,8 +1,8 @@
 # RAGs to Riches
 
 An agentic retrieval-augmented generation assistant for synthetic HR
-workflows. The current foundation provides a Python 3.12 environment and a
-FastAPI health endpoint.
+workflows. It includes a Python 3.12 API foundation, a fictional HR policy
+corpus, synthetic employee data, and deterministic policy retrieval.
 
 ## Local setup
 
@@ -34,3 +34,34 @@ Run the test suite:
 ```bash
 pytest
 ```
+
+## Policy corpus and retrieval
+
+The eight fictional policies in `policies/` use Markdown and plain text.
+`policies/manifest.json` records their provenance and AI assistance. The JSON
+records in `mock_data/` are explicitly synthetic and use reserved
+`example.invalid` addresses.
+
+Build the local SQLite FTS5 index reproducibly:
+
+```bash
+python -m rag build
+```
+
+Search chunks or produce a guarded, extractive answer with inline citations:
+
+```bash
+python -m rag search "fully remote tenure and location approval"
+python -m rag answer "Can I use PTO during parental leave?"
+```
+
+The index uses heading-aware word chunks with fixed overlap, stable SHA-256
+identifiers, BM25 ranking, and deterministic tie-breaking. Every result
+contains `document_id`, `title`, `section`, `source`, and `snippet` metadata.
+The answer path labels policy guidance, refuses unsupported questions without
+inventing citations, and rejects common instruction-override or secret-seeking
+queries. The generated `data/policy_index.sqlite3` is intentionally not
+committed; rebuilding it is the source of truth.
+
+This repository is a software demonstration. Its synthetic policies are not
+legal, employment, medical, tax, or benefits advice.

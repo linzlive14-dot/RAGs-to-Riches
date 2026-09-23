@@ -1,0 +1,50 @@
+{
+  "_notice": "SYNTHETIC DATA ONLY. Coverage is fictional and not a guarantee of benefits.",
+  "statuses": [
+    {
+      "employee_id": "SYN-1001",
+      "eligibility": "eligible",
+      "medical": "active_employee_plus_spouse",
+      "dental": "active_employee_plus_spouse",
+      "vision": "waived",
+      "coverage_effective_date": "2024-04-01",
+      "next_action": null
+    },
+    {
+      "employee_id": "SYN-1002",
+      "eligibility": "eligible",
+      "medical": "pending_initial_enrollment",
+      "dental": "pending_initial_enrollment",
+      "vision": "pending_initial_enrollment",
+      "coverage_effective_date": "2026-10-01",
+      "next_action": "Complete initial enrollment by 2026-09-02 or contact Benefits."
+    },
+    {
+      "employee_id": "SYN-1003",
+      "eligibility": "limited_part_time",
+      "medical": "not_eligible",
+      "dental": "not_eligible",
+      "vision": "not_eligible",
+      "coverage_effective_date": null,
+      "next_action": "Review voluntary benefits during annual enrollment."
+    },
+    {
+      "employee_id": "SYN-1004",
+      "eligibility": "eligible",
+      "medical": "active_family",
+      "dental": "active_family",
+      "vision": "active_family",
+      "coverage_effective_date": "2019-01-01",
+      "next_action": null
+    },
+    {
+      "employee_id": "SYN-1005",
+      "eligibility": "eligible",
+      "medical": "active_employee_only",
+      "dental": "active_employee_only",
+      "vision": "active_employee_only",
+      "coverage_effective_date": "2019-06-01",
+      "next_action": null
+    }
+  ]
+}

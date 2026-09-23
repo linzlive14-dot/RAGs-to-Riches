@@ -17,6 +17,8 @@ build/
 dist/
 .coverage
 htmlcov/
+data/*.sqlite3
+data/*.sqlite3-*
 
 # Editors and operating systems
 .DS_Store

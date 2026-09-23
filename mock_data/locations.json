@@ -1,0 +1,45 @@
+{
+  "_notice": "SYNTHETIC DATA ONLY. This is not tax, payroll, or legal guidance.",
+  "locations": [
+    {
+      "location_id": "US-CA",
+      "country": "US",
+      "region": "California",
+      "regular_remote_employment_supported": true,
+      "pto_payout_rule": "accrued unused PTO is paid at separation",
+      "international": false
+    },
+    {
+      "location_id": "US-NY",
+      "country": "US",
+      "region": "New York",
+      "regular_remote_employment_supported": true,
+      "pto_payout_rule": "follow written company policy and applicable notice",
+      "international": false
+    },
+    {
+      "location_id": "US-TX",
+      "country": "US",
+      "region": "Texas",
+      "regular_remote_employment_supported": true,
+      "pto_payout_rule": "pay only when required by written agreement or policy",
+      "international": false
+    },
+    {
+      "location_id": "US-FL",
+      "country": "US",
+      "region": "Florida",
+      "regular_remote_employment_supported": false,
+      "pto_payout_rule": "requires HR confirmation",
+      "international": false
+    },
+    {
+      "location_id": "GB-LND",
+      "country": "GB",
+      "region": "London",
+      "regular_remote_employment_supported": false,
+      "pto_payout_rule": "not applicable to current synthetic workforce",
+      "international": true
+    }
+  ]
+}

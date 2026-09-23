@@ -1,0 +1,23 @@
+{
+  "_notice": "SYNTHETIC DATA ONLY. Tickets are mock actions and do not contact a real HR team.",
+  "tickets": [
+    {
+      "ticket_id": "MOCK-HR-001",
+      "employee_id": "SYN-1001",
+      "category": "remote_work",
+      "status": "resolved",
+      "summary": "Confirm supported location before proposed move",
+      "created_at": "2026-04-10T14:20:00Z",
+      "mock": true
+    },
+    {
+      "ticket_id": "MOCK-HR-002",
+      "employee_id": "SYN-1003",
+      "category": "pto",
+      "status": "open",
+      "summary": "Review prorated accrual transaction",
+      "created_at": "2026-09-18T09:05:00Z",
+      "mock": true
+    }
+  ]
+}
