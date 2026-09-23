@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi==0.117.1",
+    "mcp==1.26.0",
     "pydantic-settings==2.10.1",
+    "sse-starlette==2.4.1",
+    "starlette==0.48.0",
     "uvicorn[standard]==0.37.0",
 ]
 
@@ -24,7 +27,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["app*", "rag*"]
+include = ["app*", "hr_mcp*", "rag*"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
