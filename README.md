@@ -11,8 +11,8 @@ benefits advice.
 
 ## Deployed application
 
-- Application: `https://<render-service-name>.onrender.com`
-- Health check: `https://<render-service-name>.onrender.com/_stcore/health`
+- Application: <https://ragsto-riches.onrender.com>
+- Health check: <https://ragsto-riches.onrender.com/_stcore/health>
 
 The service runs on Render's free tier and sleeps after inactivity, so the
 first request can take 30–60 seconds. See [deployed.md](deployed.md) for

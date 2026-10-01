@@ -4,12 +4,12 @@
 
 | Item | URL |
 | --- | --- |
-| Application (Streamlit chat UI) | `https://<render-service-name>.onrender.com` |
-| Public health endpoint | `https://<render-service-name>.onrender.com/_stcore/health` |
+| Application (Streamlit chat UI) | <https://ragsto-riches.onrender.com> |
+| Public health endpoint | <https://ragsto-riches.onrender.com/_stcore/health> |
 | API health endpoint (internal) | `http://127.0.0.1:8000/health` inside the service |
 
-Replace the placeholders above with the verified Render URL after the first
-successful deployment, and copy the same URL into the README.
+Verified on 2026-10-01: the application returned HTTP 200 and the health
+endpoint returned `ok`.
 
 ## Render architecture
 
@@ -121,7 +121,7 @@ database or connect this service to real HR systems.
 ## Operational checks
 
 ```bash
-curl --fail https://<service>.onrender.com/_stcore/health
+curl --fail https://ragsto-riches.onrender.com/_stcore/health
 python -m evaluation.runner --mode offline --skip-ablation --http https://<api-origin>
 ```
 
