@@ -51,7 +51,7 @@
           "answer_match": 1.0
         }
       },
-      "warm_p50_ms": 13.603,
+      "warm_p50_ms": 14.279,
       "failed_tasks": [
         "policy-pto-notice",
         "policy-payday"
@@ -107,7 +107,7 @@
           "answer_match": 1.0
         }
       },
-      "warm_p50_ms": 2.482,
+      "warm_p50_ms": 2.411,
       "failed_tasks": [
         "policy-pto-notice",
         "policy-parental-health",
@@ -167,7 +167,7 @@
           "answer_match": 1.0
         }
       },
-      "warm_p50_ms": 15.048,
+      "warm_p50_ms": 14.456,
       "failed_tasks": [
         "policy-pto-notice",
         "policy-payday"
@@ -223,7 +223,7 @@
           "answer_match": 1.0
         }
       },
-      "warm_p50_ms": 16.416,
+      "warm_p50_ms": 14.495,
       "failed_tasks": [
         "policy-pto-notice",
         "policy-standing-desk",
@@ -280,7 +280,7 @@
           "answer_match": 1.0
         }
       },
-      "warm_p50_ms": 14.012,
+      "warm_p50_ms": 14.146,
       "failed_tasks": [
         "policy-pto-notice",
         "policy-payday"
@@ -338,7 +338,7 @@
           "answer_match": 0.05
         }
       },
-      "warm_p50_ms": 0.118,
+      "warm_p50_ms": 0.126,
       "failed_tasks": [
         "remote-eligible-ny",
         "remote-wfh-paraphrase",
@@ -409,7 +409,7 @@
           "answer_match": 0.05
         }
       },
-      "warm_p50_ms": 0.111,
+      "warm_p50_ms": 0.122,
       "failed_tasks": [
         "remote-eligible-ny",
         "remote-wfh-paraphrase",
@@ -480,7 +480,7 @@
           "answer_match": 0.05
         }
       },
-      "warm_p50_ms": 0.092,
+      "warm_p50_ms": 0.093,
       "failed_tasks": [
         "remote-eligible-ny",
         "remote-wfh-paraphrase",

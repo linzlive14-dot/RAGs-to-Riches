@@ -8,7 +8,14 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.intent import ParsedIntent, asks_for_location_list, is_unsafe_message, resolve_intent
+from app.intent import (
+    ParsedIntent,
+    asks_for_location_list,
+    deterministic_intent,
+    is_unsafe_message,
+    needs_model_intent,
+    resolve_intent,
+)
 from rag.answering import REFUSAL
 from rag.guardrails import has_sufficient_evidence
 
@@ -683,7 +690,17 @@ class HRAgent:
         fallback = self._fallback_answer(evidence, citations)
         summary = "Assembled cited guidance deterministically"
         answer = fallback
-        if self.synthesizer is not None:
+        fixed_reply = (
+            evidence.get("blocked")
+            or evidence.get("grounded") is False
+            or evidence.get("missing")
+            or evidence.get("decision") == "needs_clarification"
+        )
+        if self.synthesizer is not None and fixed_reply:
+            summary = (
+                "Used fixed wording for a refusal or clarification; no LLM call needed"
+            )
+        elif self.synthesizer is not None:
             try:
                 answer = await self.synthesizer.synthesize(evidence)
                 summary = "Generated grounded guidance with the configured LLM"
@@ -761,7 +778,11 @@ class HRAgent:
 
         model_intent: ParsedIntent | None = None
         note = "Resolved the workflow from the user message"
-        if self.intent_extractor is not None:
+        if self.intent_extractor is not None and not needs_model_intent(
+            deterministic_intent(request.message, context_data)
+        ):
+            note = "Resolved the workflow from explicit wording; no LLM intent call needed"
+        elif self.intent_extractor is not None:
             try:
                 model_intent = ParsedIntent.model_validate(
                     await self.intent_extractor.extract(

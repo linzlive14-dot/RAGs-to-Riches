@@ -276,6 +276,27 @@ def deterministic_intent(message: str, context: dict[str, Any] | None = None) ->
     )
 
 
+def needs_model_intent(detected: ParsedIntent) -> bool:
+    """True when an LLM could change the outcome of `resolve_intent`.
+
+    `resolve_intent` keeps explicit wording, and the model can only pick a
+    workflow when an employee ID is known, so the call is skipped when the
+    message already settles the workflow and its slots, or names no employee.
+    """
+
+    if detected.intent == "unsafe" or detected.confirmed or detected.candidates:
+        return False
+    if detected.employee_id is None:
+        return False
+    if detected.intent == "policy_qa":
+        return True
+    if detected.intent == "remote_work":
+        return not (detected.requested_location_id or detected.unrecognized_location)
+    if detected.intent == "pto":
+        return detected.requested_hours is None
+    return False
+
+
 def resolve_intent(
     message: str,
     context: dict[str, Any] | None = None,

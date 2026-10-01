@@ -269,9 +269,33 @@ appear.
 agent's deterministic wording, so it measures retrieval, tools, and citations.
 `--mode llm` (the default) uses the configured model for intent and answers
 and adds an LLM judge that compares each answer with the tool evidence, gold
-answer, and key facts. In that mode a task whose answer fell back to
-deterministic wording fails groundedness and citations, so fallback text is
-never counted as model quality. `--http local` also times `/health` and
+answer, and key facts. In that mode a task whose model answer failed and fell
+back to deterministic wording fails groundedness and citations, so fallback
+text is never counted as model quality.
+
+The graded run is sized to fit OpenRouter's free limit of 50 requests per day:
+
+- The intent model is called only when it could change the result. Examples
+  are a policy question or a request with a missing detail. Explicit
+  requests ("Can SYN-1001 work remotely from New York?") are parsed by the
+  deterministic rules.
+- Clarifications, refusals, and blocked requests use fixed wording, so they
+  make no answer call.
+- The judge grades five answers per call and returns a separate verdict for
+  each. An answer missing from the judge's reply fails both judged checks.
+  Only model-written answers are judged.
+- Requests are spaced 3.5 s apart, under the roughly 20-per-minute free
+  limit. A per-minute 429 is retried after `Retry-After` or an increasing
+  delay.
+- A daily-limit 429 stops the run, discards the task in progress, and saves
+  the finished tasks with `complete: false`. `--resume` later runs only the
+  unfinished tasks.
+
+A full run makes about 30 requests: 23 answers plus a few intent and judge
+calls. Reported task latency subtracts time spent waiting for the rate limit
+and excludes judging, so it measures the assistant rather than the quota.
+
+`--http local` also times `/health` and
 `/chat` over HTTP against a freshly started server; `--http <URL>` times a
 deployed one.
 
@@ -363,12 +387,12 @@ questions are where retrieval quality shows.
 
 ### LLM-graded run
 
-Pending. The graded run needs about 90 model calls (intent, answer, and judge
-for each task), more than OpenRouter's free limit of 50 requests per day; the
-earlier attempt on the previous gold set stopped after 6 model answers. The
-provider choice for a free-tier graded run is still open, and the result will
-be added here once it runs. In CI the graded run is a separate manual or weekly
-job and does not gate deployment.
+Pending. The earlier attempt on the previous gold set made one request per
+intent, answer, and judgment (about 90 for a full run) and stopped after 6
+model answers. With the call reductions above, a full run needs about 30
+requests on OpenRouter's free tier, and the result will be added here once it
+runs. In CI the graded run is a separate, manually dispatched job and does not gate
+deployment.
 
 ### Latency
 
@@ -425,6 +449,7 @@ questions still fail without an LLM. The embedding model raises the MCP
 server's memory to roughly 290–320 MB (measured on macOS), which leaves little
 headroom on Render's 512 MB free tier; `HR_RETRIEVAL_MODE=bm25` is the
 fallback, at the cost shown in the ablation. Graded answer quality depends on
-the configured model, and the graded run is pending a free-tier provider
-decision. Render free instances can cold-start, and the JSON ticket store is
+the configured model, and the graded run is still pending. The free model
+quota is shared between the deployed demo and the graded evaluation when they
+use the same key. Render free instances can cold-start, and the JSON ticket store is
 ephemeral and unsuitable for concurrent production writes.

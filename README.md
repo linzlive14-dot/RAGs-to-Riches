@@ -71,9 +71,10 @@ OPENROUTER_API_KEY=your_key_here
 That enables LLM-generated answers. You can optionally change `OPENROUTER_MODEL` from the default `dots-studio/dots-3-note-preview:free` model. Never commit the key.
 
 OpenRouter's free models allow 50 requests per day per account unless the
-account has purchased credits, which raises the limit to 1,000. Each chat turn
-uses up to two requests, and a full graded evaluation uses about 90. When the
-limit is reached, answers fall back to deterministic cited wording.
+account has purchased credits, which raises the limit to 1,000. A chat turn
+uses at most two requests, and none when the reply is a clarification or a
+refusal. A full graded evaluation uses about 30. When the limit is reached,
+answers fall back to deterministic cited wording.
 
 The install and `python -m rag build` only need to run once. Each new terminal starts without the virtual environment, so activate it from the project directory before starting a process. Otherwise `uvicorn` and `streamlit` are not on your PATH.
 
@@ -172,7 +173,9 @@ real agent and MCP server, runs the ablation (BM25, vector, and hybrid
 retrieval, chunk sizes, and removing individual tools), and times `/health`
 and `/chat` over HTTP. Add `--skip-ablation` for a faster run.
 `python -m evaluation.runner` without `--mode` runs the LLM-graded evaluation,
-which requires `OPENROUTER_API_KEY`. Reports are written to
+which requires `OPENROUTER_API_KEY`. If the daily limit stops it partway, it
+saves the finished tasks; run it again with `--resume` after the limit resets.
+Reports are written to
 `evaluation/results/`; the committed results are summarized in
 [design-and-evaluation.md](design-and-evaluation.md#evaluation-results).
 
@@ -206,8 +209,8 @@ Pull requests and pushes to `main` run the tests, the offline evaluation
 test launches `python -m app.deploy` and checks the UI health, API health (MCP
 connected, index loaded), and one `/chat` answer. A push to `main` triggers
 Render only after all of these pass, then polls the deployed health endpoint
-for up to ten minutes. The LLM-graded evaluation runs separately on manual
-dispatch and weekly when `OPENROUTER_API_KEY` is set as a secret. It does not
+for up to ten minutes. The LLM-graded evaluation runs separately, only on manual
+dispatch, when `OPENROUTER_API_KEY` is set as a secret. It does not
 gate deployment.
 
 Free-tier instances may sleep, so the first request can take longer while the

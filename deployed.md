@@ -61,7 +61,7 @@ available on the internal loopback interface. The public UI reaches it through
 4. In the Render service settings, create a deploy hook.
 5. In GitHub, create a protected `production` environment.
 6. Add environment/repository secrets:
-   - `OPENROUTER_API_KEY` (optional): enables the manual and weekly graded
+   - `OPENROUTER_API_KEY` (optional): enables the manually dispatched graded
      evaluation job.
    - `RENDER_DEPLOY_HOOK_URL`: the private Render deploy-hook URL.
    - `DEPLOYED_APP_URL`: the public service origin, without a trailing path.
@@ -93,7 +93,7 @@ a push to `main` can enter the `deploy` job, which triggers Render and polls
 `/_stcore/health` for up to ten minutes.
 
 The LLM-graded evaluation is a separate `graded-evaluation` job. It runs on
-manual dispatch and weekly, only when `OPENROUTER_API_KEY` is configured, and
+manual dispatch only, when `OPENROUTER_API_KEY` is configured, and
 does not gate deployment. A free-tier provider limit therefore cannot block a
 release.
 

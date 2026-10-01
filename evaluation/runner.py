@@ -21,6 +21,7 @@ from app.agent import HRAgent, WorkflowResult
 from app.agent import ChatRequest as AgentChatRequest
 from app.config import get_settings
 from app.llm import (
+    DailyLimitReached,
     OpenRouterClient,
     OpenRouterIntentExtractor,
     OpenRouterJudge,
@@ -37,6 +38,8 @@ DEFAULT_REPORT = RESULTS_DIR / "llm-report.json"
 DEFAULT_ABLATION = RESULTS_DIR / "ablation.json"
 DEFAULT_HTTP_REPORT = RESULTS_DIR / "http-latency.json"
 PASSING_ANSWER_MATCH = 0.5
+JUDGE_BATCH_SIZE = 5
+EVALUATION_MIN_INTERVAL_SECONDS = 3.5
 METRICS = (
     "groundedness",
     "citations",
@@ -197,24 +200,51 @@ def _judge_evidence(result: WorkflowResult) -> dict[str, Any]:
     }
 
 
-def _llm_clients() -> tuple[OpenRouterSynthesizer, OpenRouterIntentExtractor, OpenRouterJudge]:
+def _llm_client() -> OpenRouterClient:
     settings = get_settings()
     if settings.openrouter_api_key is None:
         raise RuntimeError(
             "OPENROUTER_API_KEY is required so evaluation scores LLM answers "
             "instead of deterministic fallback text."
         )
-    client = OpenRouterClient(
+    return OpenRouterClient(
         settings.openrouter_api_key.get_secret_value(),
         model=settings.openrouter_model,
         base_url=settings.openrouter_base_url,
         timeout_seconds=max(settings.openrouter_timeout_seconds, 45.0),
+        min_interval_seconds=EVALUATION_MIN_INTERVAL_SECONDS,
     )
-    return (
-        OpenRouterSynthesizer(client),
-        OpenRouterIntentExtractor(client),
-        OpenRouterJudge(client),
+
+
+def _rubric(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "gold_answer": task.get("gold_answer"),
+        "key_facts": task.get("key_facts", []),
+        "expected_status": task["expected"].get("status"),
+        "sources_any": task["expected"].get("sources_any", []),
+    }
+
+
+def _passed(entry: dict[str, Any]) -> bool:
+    match = entry["answer_match"]
+    return all(entry["scores"].values()) and (match is None or match >= PASSING_ANSWER_MATCH)
+
+
+def _metrics(task_results: list[dict[str, Any]]) -> dict[str, float | None]:
+    values: dict[str, list[bool]] = {name: [] for name in METRICS}
+    for entry in task_results:
+        for metric, passed in entry["scores"].items():
+            values[metric].append(passed)
+    metrics: dict[str, float | None] = {
+        name: round(sum(scores) / len(scores), 4) if scores else None
+        for name, scores in values.items()
+    }
+    matches = [entry["answer_match"] for entry in task_results if entry["answer_match"] is not None]
+    metrics["answer_match"] = round(sum(matches) / len(matches), 4) if matches else None
+    metrics["answer_full_match"] = (
+        round(sum(match == 1.0 for match in matches) / len(matches), 4) if matches else None
     )
+    return metrics
 
 
 def _category_summary(task_results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -243,26 +273,75 @@ async def run_evaluation(
     overlap: int = 30,
     disabled_tools: list[str] | None = None,
     index_path: Path | None = None,
+    resume: bool = False,
+    llm_client: OpenRouterClient | None = None,
 ) -> dict[str, Any]:
     """Execute the gold set through the MCP-backed agent and score it.
 
     ``offline`` checks tool behavior, citations, and key facts without a model.
-    ``llm`` scores the configured model's answers, adding an LLM judge.
-    ``top_k`` is retained for callers; chat retrieval uses the agent's top_k.
+    ``llm`` scores the configured model's answers with a batched LLM judge.
+    When the provider's daily limit is reached, the report is saved with
+    ``complete: false``; ``resume=True`` later re-runs only the unfinished
+    tasks from ``output_path``. ``top_k`` is retained for callers; chat
+    retrieval uses the agent's top_k.
     """
 
     del top_k
+    llm = None
     synthesizer = None
     intent_extractor = None
     judge = None
     if mode == "llm":
-        synthesizer, intent_extractor, judge = _llm_clients()
+        llm = llm_client or _llm_client()
+        synthesizer = OpenRouterSynthesizer(llm)
+        intent_extractor = OpenRouterIntentExtractor(llm)
+        judge = OpenRouterJudge(llm)
 
     tasks = load_tasks(tasks_path)
+    finished: dict[str, dict[str, Any]] = {}
+    if resume and output_path is not None and output_path.exists():
+        previous = json.loads(output_path.read_text(encoding="utf-8"))
+        finished = {entry["id"]: entry for entry in previous.get("tasks", [])}
     task_results: list[dict[str, Any]] = []
-    warm_latencies: list[float] = []
-    metric_values: dict[str, list[bool]] = {name: [] for name in METRICS}
-    matches: list[float] = []
+    pending: list[tuple[dict[str, Any], dict[str, Any], WorkflowResult]] = []
+    unfinished: list[str] = []
+    stopped = False
+
+    async def judge_pending() -> None:
+        nonlocal stopped
+        batch = list(pending)
+        pending.clear()
+        if not batch or judge is None:
+            return
+        try:
+            verdicts = await judge.score_batch(
+                [
+                    {
+                        "id": task["id"],
+                        "answer": result.answer,
+                        "evidence": _judge_evidence(result),
+                        "rubric": _rubric(task),
+                    }
+                    for entry, task, result in batch
+                ]
+            )
+        except DailyLimitReached:
+            stopped = True
+            for entry, _, _ in batch:
+                task_results.remove(entry)
+                unfinished.append(entry["id"])
+            return
+        except Exception as error:
+            verdicts = {}
+            for entry, _, _ in batch:
+                entry["judge_error"] = f"{type(error).__name__}: {error}"
+        for entry, task, _ in batch:
+            verdict = verdicts.get(task["id"], {"grounded": False, "citations_accurate": False})
+            entry["judge"] = verdict
+            entry["scores"]["groundedness"] = entry["scores"]["groundedness"] and verdict["grounded"]
+            entry["scores"]["citations"] = (
+                entry["scores"]["citations"] and verdict["citations_accurate"]
+            )
 
     with tempfile.TemporaryDirectory(prefix="hr-evaluation-") as directory:
         index_build_ms = 0.0
@@ -285,68 +364,72 @@ async def run_evaluation(
                 disabled_tools=set(disabled_tools or ()),
             )
             for task in tasks:
+                if task["id"] in finished:
+                    task_results.append(finished[task["id"]])
+                    continue
+                if stopped:
+                    unfinished.append(task["id"])
+                    continue
+                waited_before = llm.waited_seconds if llm else 0.0
                 started = time.perf_counter()
                 result = await agent.chat(AgentChatRequest(message=task["message"]))
+                waited_ms = ((llm.waited_seconds if llm else 0.0) - waited_before) * 1_000
+                elapsed_ms = (time.perf_counter() - started) * 1_000 - waited_ms
+                if llm is not None and llm.daily_limit_reached:
+                    stopped = True
+                    unfinished.append(task["id"])
+                    continue
                 scores = _structural_scores(task, result)
                 source = _answer_source(result)
-                if mode == "llm" and source != "llm":
+                if mode == "llm" and source == "fallback":
                     if "groundedness" in scores:
                         scores["groundedness"] = False
                     if "citations" in scores:
                         scores["citations"] = False
-                elif judge is not None and "groundedness" in scores:
-                    judged = await judge.score(
-                        answer=result.answer,
-                        evidence=_judge_evidence(result),
-                        rubric={
-                            "gold_answer": task.get("gold_answer"),
-                            "key_facts": task.get("key_facts", []),
-                            "expected_status": task["expected"].get("status"),
-                            "sources_any": task["expected"].get("sources_any", []),
-                        },
-                    )
-                    scores["groundedness"] = scores["groundedness"] and judged["grounded"]
-                    scores["citations"] = scores["citations"] and judged["citations_accurate"]
-                elapsed_ms = (time.perf_counter() - started) * 1_000
-                warm_latencies.append(elapsed_ms)
-                match = answer_match(task, result.answer)
-                if match is not None:
-                    matches.append(match)
-                for metric, passed in scores.items():
-                    metric_values[metric].append(passed)
-                task_results.append(
-                    {
-                        "id": task["id"],
-                        "kind": task["kind"],
-                        "category": task.get("category", task["kind"]),
-                        "passed": all(scores.values())
-                        and (match is None or match >= PASSING_ANSWER_MATCH),
-                        "scores": scores,
-                        "answer_match": match,
-                        "answer_source": source,
-                        "actual": {
-                            "status": result.status,
-                            "tools": _tool_names(result),
-                            "citation_sources": [item.source for item in result.citations],
-                            "answer": result.answer,
-                        },
-                        "latency_ms": round(elapsed_ms, 3),
-                    }
-                )
+                entry: dict[str, Any] = {
+                    "id": task["id"],
+                    "kind": task["kind"],
+                    "category": task.get("category", task["kind"]),
+                    "scores": scores,
+                    "answer_match": answer_match(task, result.answer),
+                    "answer_source": source,
+                    "actual": {
+                        "status": result.status,
+                        "tools": _tool_names(result),
+                        "citation_sources": [item.source for item in result.citations],
+                        "answer": result.answer,
+                    },
+                    "latency_ms": round(elapsed_ms, 3),
+                    "rate_limit_wait_ms": round(waited_ms, 3),
+                }
+                task_results.append(entry)
+                if judge is not None and source == "llm" and "groundedness" in scores:
+                    pending.append((entry, task, result))
+                    if len(pending) >= JUDGE_BATCH_SIZE:
+                        await judge_pending()
+            await judge_pending()
 
-    metrics: dict[str, float | None] = {
-        name: round(sum(values) / len(values), 4) if values else None
-        for name, values in metric_values.items()
-    }
-    metrics["answer_match"] = round(sum(matches) / len(matches), 4) if matches else None
-    metrics["answer_full_match"] = (
-        round(sum(match == 1.0 for match in matches) / len(matches), 4) if matches else None
-    )
+    for entry in task_results:
+        entry["passed"] = _passed(entry)
+    order = {task["id"]: position for position, task in enumerate(tasks)}
+    unfinished.sort(key=order.__getitem__)
+    metrics = _metrics(task_results)
     cold_samples = [mcp_startup_ms] + ([index_build_ms] if index_build_ms else [])
     report: dict[str, Any] = {
         "task_count": len(tasks),
-        "passed": sum(result["passed"] for result in task_results),
+        "tasks_scored": len(task_results),
+        "complete": not unfinished,
+        "unfinished_tasks": unfinished,
+        "passed": sum(entry["passed"] for entry in task_results),
         "answer_source": "llm" if mode == "llm" else "deterministic",
+        "llm": None
+        if llm is None
+        else {
+            "model": llm.model,
+            "requests_this_run": llm.requests,
+            "judge_batch_size": JUDGE_BATCH_SIZE,
+            "daily_limit_reached": llm.daily_limit_reached,
+        },
         "configuration": {
             "retrieval_mode": retrieval_mode or os.environ.get("HR_RETRIEVAL_MODE", "hybrid"),
             "chunk_size": chunk_size,
@@ -361,7 +444,8 @@ async def run_evaluation(
                 "index_build": round(index_build_ms, 3),
                 "mcp_startup": round(mcp_startup_ms, 3),
             },
-            "warm": _latency_summary(warm_latencies),
+            "warm": _latency_summary([entry["latency_ms"] for entry in task_results]),
+            "warm_excludes_rate_limit_waits": True,
         },
         "tasks": task_results,
     }
@@ -559,22 +643,41 @@ def main() -> None:
         default=None,
         help="Exit non-zero when fewer than this fraction of tasks pass.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Keep finished tasks from --output and run only the unfinished ones.",
+    )
     args = parser.parse_args()
     output = args.output or RESULTS_DIR / f"{args.mode}-report.json"
     try:
         report = asyncio.run(
-            run_evaluation(tasks_path=args.tasks, output_path=output, mode=args.mode)
+            run_evaluation(
+                tasks_path=args.tasks,
+                output_path=output,
+                mode=args.mode,
+                resume=args.resume,
+            )
         )
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
     summary: dict[str, Any] = {
         "evaluation": {
+            "complete": report["complete"],
             "passed": report["passed"],
+            "tasks_scored": report["tasks_scored"],
             "task_count": report["task_count"],
             "metrics": report["metrics"],
+            "llm": report["llm"],
             "report": str(output),
         }
     }
+    if not report["complete"]:
+        print(
+            f"Daily model limit reached; {len(report['unfinished_tasks'])} tasks unfinished. "
+            "Run again with --resume after the limit resets.",
+            file=sys.stderr,
+        )
     if not args.skip_ablation:
         ablation = run_ablation(tasks_path=args.tasks, output_path=args.ablation_output)
         summary["ablation"] = {
@@ -590,7 +693,11 @@ def main() -> None:
         )
         summary["http"] = {"cold": http_report["cold"], "warm_chat": http_report["warm"]["chat"]}
     print(json.dumps(summary, indent=2))
-    if args.min_pass_rate is not None and report["passed"] < args.min_pass_rate * report["task_count"]:
+    if (
+        args.min_pass_rate is not None
+        and report["complete"]
+        and report["passed"] < args.min_pass_rate * report["task_count"]
+    ):
         raise SystemExit(
             f"Evaluation passed {report['passed']}/{report['task_count']}, "
             f"below the required {args.min_pass_rate:.0%}"
