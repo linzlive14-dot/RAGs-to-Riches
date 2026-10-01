@@ -1,0 +1,514 @@
+{
+  "answer_source": "deterministic",
+  "configurations": [
+    {
+      "name": "hybrid retrieval (default)",
+      "retrieval_mode": "hybrid",
+      "chunk_size": 180,
+      "overlap": 30,
+      "disabled_tools": [],
+      "passed": 28,
+      "task_count": 30,
+      "metrics": {
+        "groundedness": 1.0,
+        "citations": 1.0,
+        "tool_selection": 1.0,
+        "workflow": 1.0,
+        "clarification": 1.0,
+        "safety": 1.0,
+        "answer_match": 0.9,
+        "answer_full_match": 0.8667
+      },
+      "categories": {
+        "ambiguous": {
+          "tasks": 3,
+          "passed": 3,
+          "answer_match": 1.0
+        },
+        "multi_document": {
+          "tasks": 5,
+          "passed": 5,
+          "answer_match": 1.0
+        },
+        "out_of_scope": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "policy": {
+          "tasks": 8,
+          "passed": 6,
+          "answer_match": 0.625
+        },
+        "unsafe": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "workflow": {
+          "tasks": 10,
+          "passed": 10,
+          "answer_match": 1.0
+        }
+      },
+      "warm_p50_ms": 13.603,
+      "failed_tasks": [
+        "policy-pto-notice",
+        "policy-payday"
+      ]
+    },
+    {
+      "name": "BM25 only",
+      "retrieval_mode": "bm25",
+      "chunk_size": 180,
+      "overlap": 30,
+      "disabled_tools": [],
+      "passed": 24,
+      "task_count": 30,
+      "metrics": {
+        "groundedness": 0.92,
+        "citations": 0.92,
+        "tool_selection": 1.0,
+        "workflow": 1.0,
+        "clarification": 1.0,
+        "safety": 1.0,
+        "answer_match": 0.75,
+        "answer_full_match": 0.7
+      },
+      "categories": {
+        "ambiguous": {
+          "tasks": 3,
+          "passed": 3,
+          "answer_match": 1.0
+        },
+        "multi_document": {
+          "tasks": 5,
+          "passed": 4,
+          "answer_match": 0.7
+        },
+        "out_of_scope": {
+          "tasks": 2,
+          "passed": 1,
+          "answer_match": 0.5
+        },
+        "policy": {
+          "tasks": 8,
+          "passed": 4,
+          "answer_match": 0.375
+        },
+        "unsafe": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "workflow": {
+          "tasks": 10,
+          "passed": 10,
+          "answer_match": 1.0
+        }
+      },
+      "warm_p50_ms": 2.482,
+      "failed_tasks": [
+        "policy-pto-notice",
+        "policy-parental-health",
+        "policy-benefits-enrollment",
+        "policy-travel-meals",
+        "policy-payday",
+        "out-of-scope-restaurant"
+      ]
+    },
+    {
+      "name": "vector only",
+      "retrieval_mode": "vector",
+      "chunk_size": 180,
+      "overlap": 30,
+      "disabled_tools": [],
+      "passed": 28,
+      "task_count": 30,
+      "metrics": {
+        "groundedness": 1.0,
+        "citations": 1.0,
+        "tool_selection": 1.0,
+        "workflow": 1.0,
+        "clarification": 1.0,
+        "safety": 1.0,
+        "answer_match": 0.8833,
+        "answer_full_match": 0.8333
+      },
+      "categories": {
+        "ambiguous": {
+          "tasks": 3,
+          "passed": 3,
+          "answer_match": 1.0
+        },
+        "multi_document": {
+          "tasks": 5,
+          "passed": 5,
+          "answer_match": 0.9
+        },
+        "out_of_scope": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "policy": {
+          "tasks": 8,
+          "passed": 6,
+          "answer_match": 0.625
+        },
+        "unsafe": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "workflow": {
+          "tasks": 10,
+          "passed": 10,
+          "answer_match": 1.0
+        }
+      },
+      "warm_p50_ms": 15.048,
+      "failed_tasks": [
+        "policy-pto-notice",
+        "policy-payday"
+      ]
+    },
+    {
+      "name": "hybrid, 100-word chunks",
+      "retrieval_mode": "hybrid",
+      "chunk_size": 100,
+      "overlap": 20,
+      "disabled_tools": [],
+      "passed": 27,
+      "task_count": 30,
+      "metrics": {
+        "groundedness": 1.0,
+        "citations": 1.0,
+        "tool_selection": 1.0,
+        "workflow": 1.0,
+        "clarification": 1.0,
+        "safety": 1.0,
+        "answer_match": 0.8667,
+        "answer_full_match": 0.8333
+      },
+      "categories": {
+        "ambiguous": {
+          "tasks": 3,
+          "passed": 3,
+          "answer_match": 1.0
+        },
+        "multi_document": {
+          "tasks": 5,
+          "passed": 4,
+          "answer_match": 0.8
+        },
+        "out_of_scope": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "policy": {
+          "tasks": 8,
+          "passed": 6,
+          "answer_match": 0.625
+        },
+        "unsafe": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "workflow": {
+          "tasks": 10,
+          "passed": 10,
+          "answer_match": 1.0
+        }
+      },
+      "warm_p50_ms": 16.416,
+      "failed_tasks": [
+        "policy-pto-notice",
+        "policy-standing-desk",
+        "policy-payday"
+      ]
+    },
+    {
+      "name": "hybrid, 260-word chunks",
+      "retrieval_mode": "hybrid",
+      "chunk_size": 260,
+      "overlap": 40,
+      "disabled_tools": [],
+      "passed": 28,
+      "task_count": 30,
+      "metrics": {
+        "groundedness": 1.0,
+        "citations": 1.0,
+        "tool_selection": 1.0,
+        "workflow": 1.0,
+        "clarification": 1.0,
+        "safety": 1.0,
+        "answer_match": 0.8889,
+        "answer_full_match": 0.8333
+      },
+      "categories": {
+        "ambiguous": {
+          "tasks": 3,
+          "passed": 3,
+          "answer_match": 1.0
+        },
+        "multi_document": {
+          "tasks": 5,
+          "passed": 5,
+          "answer_match": 0.9333
+        },
+        "out_of_scope": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "policy": {
+          "tasks": 8,
+          "passed": 6,
+          "answer_match": 0.625
+        },
+        "unsafe": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "workflow": {
+          "tasks": 10,
+          "passed": 10,
+          "answer_match": 1.0
+        }
+      },
+      "warm_p50_ms": 14.012,
+      "failed_tasks": [
+        "policy-pto-notice",
+        "policy-payday"
+      ]
+    },
+    {
+      "name": "without get_policy_section",
+      "retrieval_mode": "hybrid",
+      "chunk_size": 180,
+      "overlap": 30,
+      "disabled_tools": [
+        "get_policy_section"
+      ],
+      "passed": 15,
+      "task_count": 30,
+      "metrics": {
+        "groundedness": 0.48,
+        "citations": 0.48,
+        "tool_selection": 0.5667,
+        "workflow": 0.5625,
+        "clarification": 1.0,
+        "safety": 1.0,
+        "answer_match": 0.4833,
+        "answer_full_match": 0.4333
+      },
+      "categories": {
+        "ambiguous": {
+          "tasks": 3,
+          "passed": 3,
+          "answer_match": 1.0
+        },
+        "multi_document": {
+          "tasks": 5,
+          "passed": 2,
+          "answer_match": 0.4
+        },
+        "out_of_scope": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "policy": {
+          "tasks": 8,
+          "passed": 6,
+          "answer_match": 0.625
+        },
+        "unsafe": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "workflow": {
+          "tasks": 10,
+          "passed": 0,
+          "answer_match": 0.05
+        }
+      },
+      "warm_p50_ms": 0.118,
+      "failed_tasks": [
+        "remote-eligible-ny",
+        "remote-wfh-paraphrase",
+        "remote-hybrid-role",
+        "remote-unsupported-state",
+        "remote-international",
+        "pto-one-day",
+        "pto-full-balance",
+        "pto-over-balance",
+        "pto-part-time",
+        "pto-ticket-gated",
+        "benefits-window-closed",
+        "benefits-part-time",
+        "benefits-enrolled",
+        "policy-pto-notice",
+        "policy-payday"
+      ]
+    },
+    {
+      "name": "without check_policy_compliance",
+      "retrieval_mode": "hybrid",
+      "chunk_size": 180,
+      "overlap": 30,
+      "disabled_tools": [
+        "check_policy_compliance"
+      ],
+      "passed": 15,
+      "task_count": 30,
+      "metrics": {
+        "groundedness": 0.48,
+        "citations": 0.48,
+        "tool_selection": 0.5667,
+        "workflow": 0.5625,
+        "clarification": 1.0,
+        "safety": 1.0,
+        "answer_match": 0.4833,
+        "answer_full_match": 0.4333
+      },
+      "categories": {
+        "ambiguous": {
+          "tasks": 3,
+          "passed": 3,
+          "answer_match": 1.0
+        },
+        "multi_document": {
+          "tasks": 5,
+          "passed": 2,
+          "answer_match": 0.4
+        },
+        "out_of_scope": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "policy": {
+          "tasks": 8,
+          "passed": 6,
+          "answer_match": 0.625
+        },
+        "unsafe": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "workflow": {
+          "tasks": 10,
+          "passed": 0,
+          "answer_match": 0.05
+        }
+      },
+      "warm_p50_ms": 0.111,
+      "failed_tasks": [
+        "remote-eligible-ny",
+        "remote-wfh-paraphrase",
+        "remote-hybrid-role",
+        "remote-unsupported-state",
+        "remote-international",
+        "pto-one-day",
+        "pto-full-balance",
+        "pto-over-balance",
+        "pto-part-time",
+        "pto-ticket-gated",
+        "benefits-window-closed",
+        "benefits-part-time",
+        "benefits-enrolled",
+        "policy-pto-notice",
+        "policy-payday"
+      ]
+    },
+    {
+      "name": "without search_policy_documents",
+      "retrieval_mode": "hybrid",
+      "chunk_size": 180,
+      "overlap": 30,
+      "disabled_tools": [
+        "search_policy_documents"
+      ],
+      "passed": 5,
+      "task_count": 30,
+      "metrics": {
+        "groundedness": 0.08,
+        "citations": 0.08,
+        "tool_selection": 0.1667,
+        "workflow": 0.5625,
+        "clarification": 1.0,
+        "safety": 1.0,
+        "answer_match": 0.1833,
+        "answer_full_match": 0.1667
+      },
+      "categories": {
+        "ambiguous": {
+          "tasks": 3,
+          "passed": 3,
+          "answer_match": 1.0
+        },
+        "multi_document": {
+          "tasks": 5,
+          "passed": 0,
+          "answer_match": 0.0
+        },
+        "out_of_scope": {
+          "tasks": 2,
+          "passed": 0,
+          "answer_match": 0.0
+        },
+        "policy": {
+          "tasks": 8,
+          "passed": 0,
+          "answer_match": 0.0
+        },
+        "unsafe": {
+          "tasks": 2,
+          "passed": 2,
+          "answer_match": 1.0
+        },
+        "workflow": {
+          "tasks": 10,
+          "passed": 0,
+          "answer_match": 0.05
+        }
+      },
+      "warm_p50_ms": 0.092,
+      "failed_tasks": [
+        "remote-eligible-ny",
+        "remote-wfh-paraphrase",
+        "remote-hybrid-role",
+        "remote-unsupported-state",
+        "remote-international",
+        "pto-one-day",
+        "pto-full-balance",
+        "pto-over-balance",
+        "pto-part-time",
+        "pto-ticket-gated",
+        "benefits-window-closed",
+        "benefits-part-time",
+        "benefits-enrolled",
+        "policy-pto-notice",
+        "policy-remote-prerequisites",
+        "policy-parental-health",
+        "policy-benefits-enrollment",
+        "policy-stolen-laptop",
+        "policy-standing-desk",
+        "policy-travel-meals",
+        "policy-payday",
+        "policy-thanksgiving",
+        "policy-resignation-notice",
+        "out-of-scope-espresso",
+        "out-of-scope-restaurant"
+      ]
+    }
+  ],
+  "recommended": "hybrid retrieval (default)"
+}

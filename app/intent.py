@@ -16,11 +16,22 @@ from pydantic import BaseModel, Field
 from rag.guardrails import INJECTION_PATTERNS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-IntentLabel = Literal["policy_qa", "remote_work", "pto", "out_of_scope", "unsafe"]
+IntentLabel = Literal["policy_qa", "remote_work", "pto", "benefits", "out_of_scope", "unsafe"]
+WORKFLOW_INTENTS = {"remote_work", "pto", "benefits"}
 EMPLOYEE_RE = re.compile(r"\bSYN-\d{4}\b", re.IGNORECASE)
 HOURS_RE = re.compile(r"(?<!\d)(\d+(?:\.\d+)?)\s*hours?\b", re.IGNORECASE)
-REMOTE_RE = re.compile(r"\b(?:remote|remotely)\b", re.IGNORECASE)
-PTO_RE = re.compile(r"\b(?:pto|paid time off|vacation)\b", re.IGNORECASE)
+REMOTE_RE = re.compile(
+    r"\b(?:remote|remotely|wfh|telework\w*|telecommut\w*|work(?:ing)? from home)\b",
+    re.IGNORECASE,
+)
+PTO_RE = re.compile(
+    r"\b(?:pto|paid time off|vacation|time off|(?:days?|hours?) off)\b",
+    re.IGNORECASE,
+)
+BENEFITS_RE = re.compile(
+    r"\b(?:benefits?|health (?:plan|insurance|coverage)|medical|dental|vision|enroll(?:ment|ed)?)\b",
+    re.IGNORECASE,
+)
 TICKET_RE = re.compile(r"\bticket\b", re.IGNORECASE)
 QUESTION_RE = re.compile(
     r"^\s*(?:what|how|when|where|why|who|explain|describe)\b",
@@ -40,6 +51,7 @@ class ParsedIntent(BaseModel):
     requested_hours: float | None = Field(default=None, gt=0)
     create_ticket: bool = False
     confirmed: bool = False
+    candidates: list[str] = Field(default_factory=list)
 
 
 _PLACE_RE = re.compile(
@@ -182,7 +194,7 @@ def deterministic_intent(message: str, context: dict[str, Any] | None = None) ->
 
     if context.get("awaiting_confirmation") and AFFIRM_RE.search(message):
         workflow = context.get("workflow")
-        intent: IntentLabel = workflow if workflow in {"remote_work", "pto"} else "policy_qa"
+        intent: IntentLabel = workflow if workflow in WORKFLOW_INTENTS else "policy_qa"
         return ParsedIntent(
             intent=intent,
             employee_id=_valid_employee_id(context.get("employee_id")),
@@ -208,15 +220,27 @@ def deterministic_intent(message: str, context: dict[str, Any] | None = None) ->
     create_ticket = bool(TICKET_RE.search(message))
     remote = REMOTE_RE.search(message) is not None
     pto = PTO_RE.search(message) is not None
-    inherited = context.get("workflow") if context.get("workflow") in {"remote_work", "pto"} else None
+    benefits = BENEFITS_RE.search(message) is not None
+    inherited = context.get("workflow") if context.get("workflow") in WORKFLOW_INTENTS else None
     fills_saved_workflow = (
         inherited is not None
         and QUESTION_RE.search(message) is None
         and (hours_match is not None or location_id is not None or employee_match is not None)
-        and not (remote or pto)
+        and not (remote or pto or benefits)
     )
 
+    mentioned = [
+        name
+        for name, present in (("remote_work", remote), ("pto", pto), ("benefits", benefits))
+        if present
+    ]
     intent: IntentLabel
+    if employee_id and len(mentioned) > 1:
+        return ParsedIntent(
+            intent=mentioned[0],  # type: ignore[arg-type]
+            employee_id=employee_id,
+            candidates=mentioned,
+        )
     if employee_id and remote:
         intent = "remote_work"
     elif unrecognized and (remote or context.get("workflow") == "remote_work"):
@@ -224,6 +248,8 @@ def deterministic_intent(message: str, context: dict[str, Any] | None = None) ->
         employee_id = employee_id or _valid_employee_id(context.get("employee_id"))
     elif employee_id and pto:
         intent = "pto"
+    elif employee_id and benefits:
+        intent = "benefits"
     elif remote and (location_id or unrecognized) and not pto:
         intent = "remote_work"
     elif pto and hours is not None:
@@ -238,6 +264,8 @@ def deterministic_intent(message: str, context: dict[str, Any] | None = None) ->
     else:
         intent = "policy_qa"
 
+    if intent in WORKFLOW_INTENTS and employee_id is None:
+        employee_id = _valid_employee_id(context.get("employee_id"))
     return ParsedIntent(
         intent=intent,
         employee_id=employee_id,
@@ -256,13 +284,13 @@ def resolve_intent(
     """Combine a model label with slots that appear explicitly in the message."""
 
     detected = deterministic_intent(message, context)
-    if model is None or detected.intent == "unsafe" or detected.confirmed:
+    if model is None or detected.intent == "unsafe" or detected.confirmed or detected.candidates:
         return detected
 
     employee_id = detected.employee_id or _valid_employee_id(model.employee_id)
-    if detected.intent in {"remote_work", "pto"}:
+    if detected.intent in WORKFLOW_INTENTS:
         intent: IntentLabel = detected.intent
-    elif model.intent in {"remote_work", "pto"} and employee_id:
+    elif model.intent in WORKFLOW_INTENTS and employee_id:
         intent = model.intent
     else:
         intent = "policy_qa"

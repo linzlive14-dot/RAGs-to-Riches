@@ -1,12 +1,22 @@
 # RAGs to Riches
 
 An MCP-backed HR policy assistant built entirely around fictional
-policies and synthetic employee records. It demonstrates cited retrieval,
-multi-step remote-work and PTO workflows, safe mock actions, operational traces,
-grounded OpenRouter answer generation, evaluation, and a test-gated deployment.
+policies and synthetic employee records. It demonstrates hybrid (keyword plus
+local embedding) retrieval with citations, multi-step remote-work, PTO, and
+benefits workflows, safe mock actions, operational traces, grounded OpenRouter
+answer generation, evaluation with ablations, and a test-gated deployment.
 
 This is a software demonstration—not legal, employment, medical, tax, or
 benefits advice.
+
+## Deployed application
+
+- Application: `https://<render-service-name>.onrender.com`
+- Health check: `https://<render-service-name>.onrender.com/_stcore/health`
+
+The service runs on Render's free tier and sleeps after inactivity, so the
+first request can take 30–60 seconds. See [deployed.md](deployed.md) for
+deployment details and cold-start notes.
 
 ## Architecture
 
@@ -17,19 +27,21 @@ flowchart LR
     API --> Agent[Explicit state machine]
     Agent --> Client[MCP client]
     Client -->|stdio| Server[FastMCP server]
-    Server --> Index[SQLite FTS5 policy index]
+    Server --> Index[SQLite FTS5 + FAISS policy index]
     Server --> Data[Synthetic JSON records]
-    Agent --> LLM[OpenRouter LLM]
+    Agent --> LLM[OpenRouter LLM, optional]
     LLM --> Output[Citations and operational trace]
 ```
 
 The orchestrator exposes states and tool activity, not hidden chain-of-thought.
-A chat message is classified into a policy question, remote-work request, or
-PTO request. Retrieval and compliance decisions remain deterministic. Tool
-misses, such as an unknown employee or location, come back as findings the
-assistant can explain. When `OPENROUTER_API_KEY` is configured, an LLM
-interprets the message and writes the cited answer from that evidence.
-Invalid or unavailable model output falls back to safe deterministic wording.
+FastAPI keeps one MCP session open; the agent discovers its tools on each turn
+and escalates if a tool it needs is missing. A chat message is classified into
+a policy question or a remote-work, PTO, or benefits request. Retrieval and
+compliance decisions remain deterministic. Tool misses, such as an unknown
+employee or location, come back as findings the assistant can explain. When
+`OPENROUTER_API_KEY` is configured, an LLM interprets the message and writes
+the cited answer from that evidence. Without a key, or when the model is
+unavailable, answers use deterministic wording built from the same evidence.
 
 ## Run locally
 
@@ -45,13 +57,23 @@ cp .env.example .env
 python -m rag build
 ```
 
+The first `python -m rag build` downloads the embedding model
+(`BAAI/bge-small-en-v1.5`, about 66 MB) into `data/models/` and then runs
+offline. It needs no API key. To skip embeddings and build a keyword-only
+index, run `python -m rag build --no-embed`.
+
 The copied `.env` leaves `OPENROUTER_API_KEY` blank. Open that file and put your key on the existing line:
 
 ```bash
 OPENROUTER_API_KEY=your_key_here
 ```
 
-That enables LLM-generated answers. You can optionally change `OPENROUTER_MODEL` from the default `inclusionai/ling-3.0-flash-vl:free` model. Never commit the key.
+That enables LLM-generated answers. You can optionally change `OPENROUTER_MODEL` from the default `dots-studio/dots-3-note-preview:free` model. Never commit the key.
+
+OpenRouter's free models allow 50 requests per day per account unless the
+account has purchased credits, which raises the limit to 1,000. Each chat turn
+uses up to two requests, and a full graded evaluation uses about 90. When the
+limit is reached, answers fall back to deterministic cited wording.
 
 The install and `python -m rag build` only need to run once. Each new terminal starts without the virtual environment, so activate it from the project directory before starting a process. Otherwise `uvicorn` and `streamlit` are not on your PATH.
 
@@ -78,7 +100,9 @@ Type a question in the chat box, or start from one of the sidebar examples:
 - `I am SYN-1001. Can I work remotely from New York?` is eligible for review.
 - `I am SYN-1003. Can I work remotely from Texas?` needs HR review.
 - `I am SYN-1002. Can I take 8 hours of PTO?` is eligible for review.
-- Ask a policy question, such as `Can I use PTO during parental leave?`
+- `I'm SYN-1002. Am I enrolled in benefits yet?` explains the closed
+  enrollment window.
+- Ask a policy question, such as `My laptop was stolen. Who do I tell?`
 - To propose a mock ticket, add `Please create a mock HR ticket` to a request.
   The assistant asks you to confirm. Reply `Yes` and the ticket is written only
   after that confirmation.
@@ -88,17 +112,21 @@ and returns the answer, citations, snippets, and tool trace. Each result
 includes policy citation cards and an expandable trace of states, safe tool
 arguments, summaries, and source names.
 
-Graded evaluation calls the configured LLM and scores those answers. It
-requires `OPENROUTER_API_KEY`. Add that key as a GitHub Actions secret so CI
-can run `python -m evaluation.runner`. Pytest still covers the offline tool
-path without a key.
+`GET /health` reports whether the MCP session is connected (with its tool
+list), whether the index is loaded and in which retrieval mode, and whether an
+LLM is configured.
 
 ## Retrieval and MCP
 
 The twelve-policy Markdown/TXT corpus and all JSON records are explicitly
 synthetic. `policies/manifest.json` records provenance and AI assistance.
-Heading-aware chunks use fixed overlap, stable SHA-256 identifiers, SQLite FTS5
-BM25 ranking, and deterministic tie-breaking.
+Heading-aware chunks use fixed overlap, stable SHA-256 identifiers, and
+deterministic ordering. Search fuses two rankings: SQLite FTS5 BM25 for exact
+terms, and a FAISS index of local `bge-small` embeddings for meaning. Each
+result includes the sentence closest to the question, which becomes the cited
+snippet. A question is answered only when a chunk is close enough in meaning;
+otherwise the assistant says the policies do not cover it.
+`HR_RETRIEVAL_MODE=bm25` turns embeddings off to save about 230 MB of memory.
 
 The commands below are optional examples for inspecting that index from a
 terminal. Activate the virtual environment first. `search` and `answer` use the
@@ -106,10 +134,11 @@ index created by `python -m rag build`. The quoted text is a sample query you
 can replace.
 
 Search prints the top five matching policy chunks as JSON, including title,
-section, source, snippet, and score:
+section, source, snippet, score, similarity, and best-matching passage. Add
+`--mode bm25` or `--mode vector` to compare a single ranker:
 
 ```bash
-python -m rag search "fully remote tenure and location approval"
+python -m rag search "Can I work from my parents' house in another state?"
 ```
 
 Answer prints a short cited reply assembled from matching policy sentences. If
@@ -135,11 +164,17 @@ The agent reaches all tool implementations through the MCP client boundary.
 
 ```bash
 pytest
-python -m evaluation.runner
+python -m evaluation.runner --mode offline --http local
 ```
 
-The evaluation command writes local reports under `evaluation/`. Generated
-reports are ignored by Git.
+The offline evaluation needs no API key. It runs the 30 gold tasks through the
+real agent and MCP server, runs the ablation (BM25, vector, and hybrid
+retrieval, chunk sizes, and removing individual tools), and times `/health`
+and `/chat` over HTTP. Add `--skip-ablation` for a faster run.
+`python -m evaluation.runner` without `--mode` runs the LLM-graded evaluation,
+which requires `OPENROUTER_API_KEY`. Reports are written to
+`evaluation/results/`; the committed results are summarized in
+[design-and-evaluation.md](design-and-evaluation.md#evaluation-results).
 
 ## Deploy to Render
 
@@ -166,9 +201,14 @@ enable deployment from GitHub Actions:
    `https://ragsto-riches.onrender.com`.
 4. Push to `main`.
 
-Pull requests and pushes to `main` run tests plus evaluation. A push to `main`
-triggers Render only after those checks pass, then polls the deployed health
-endpoint for up to ten minutes.
+Pull requests and pushes to `main` run the tests, the offline evaluation
+(which must pass at least 90% of tasks), and a start-up smoke test. The smoke
+test launches `python -m app.deploy` and checks the UI health, API health (MCP
+connected, index loaded), and one `/chat` answer. A push to `main` triggers
+Render only after all of these pass, then polls the deployed health endpoint
+for up to ten minutes. The LLM-graded evaluation runs separately on manual
+dispatch and weekly when `OPENROUTER_API_KEY` is set as a secret. It does not
+gate deployment.
 
 Free-tier instances may sleep, so the first request can take longer while the
 service starts. Confirmed mock tickets use ephemeral local storage and may be

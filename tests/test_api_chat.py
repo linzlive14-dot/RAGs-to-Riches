@@ -17,9 +17,12 @@ def test_chat_answers_a_natural_language_remote_work_question() -> None:
     assert "[P1]" in payload["answer"]
     assert [step["tool"] for step in payload["trace"] if step["tool"]] == [
         "lookup_employee_profile",
-        "search_policy_documents",
         "check_policy_compliance",
+        "search_policy_documents",
+        "search_policy_documents",
+        "get_policy_section",
     ]
+    assert all(step["output_preview"] for step in payload["trace"] if step["tool"])
 
 
 def test_chat_asks_for_missing_pto_hours() -> None:

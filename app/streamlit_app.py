@@ -53,7 +53,13 @@ def _render_result(result: dict[str, Any]) -> None:
             st.markdown(f"**{step['state']}**{tool} — {step['status']}")
             st.caption(step["result_summary"])
             if step.get("safe_arguments"):
-                st.json(step["safe_arguments"])
+                st.markdown("Arguments")
+                st.json(step["safe_arguments"], expanded=False)
+            if step.get("output_preview"):
+                st.markdown("Output")
+                st.json(step["output_preview"], expanded=False)
+            if step.get("sources"):
+                st.caption("Sources: " + ", ".join(step["sources"]))
 
 
 def _history_before_latest() -> list[dict[str, str]]:

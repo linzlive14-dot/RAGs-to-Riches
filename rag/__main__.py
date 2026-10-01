@@ -14,6 +14,7 @@ from rag.ingestion import chunk_documents, load_documents
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICIES = PROJECT_ROOT / "policies"
 DEFAULT_INDEX = PROJECT_ROOT / "data" / "policy_index.sqlite3"
+MODES = ("hybrid", "bm25", "vector")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -25,11 +26,17 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--index", type=Path, default=DEFAULT_INDEX)
     build.add_argument("--chunk-size", type=int, default=180)
     build.add_argument("--overlap", type=int, default=30)
+    build.add_argument(
+        "--no-embed",
+        action="store_true",
+        help="Skip embeddings and build a keyword-only index.",
+    )
 
     search = subparsers.add_parser("search", help="Search indexed policy chunks.")
     search.add_argument("query")
     search.add_argument("--index", type=Path, default=DEFAULT_INDEX)
     search.add_argument("--top-k", type=int, default=5)
+    search.add_argument("--mode", choices=MODES, default=None)
 
     answer = subparsers.add_parser("answer", help="Create a cited extractive policy answer.")
     answer.add_argument("query")
@@ -50,12 +57,24 @@ def main() -> None:
                 "chunk_size": args.chunk_size,
                 "overlap": args.overlap,
                 "policy_directory": args.policies.resolve().as_posix(),
-                "retrieval": "sqlite-fts5-bm25",
+                "retrieval": "sqlite-fts5-bm25" if args.no_embed else "hybrid-bm25-faiss-rrf",
             },
+            embed=not args.no_embed,
         )
-        print(json.dumps({"documents": len(documents), "chunks": count, "index": str(args.index)}))
+        print(
+            json.dumps(
+                {
+                    "documents": len(documents),
+                    "chunks": count,
+                    "index": str(args.index),
+                    "vectors": index.has_vectors(),
+                }
+            )
+        )
     elif args.command == "search":
-        print(json.dumps(index.export_results(args.query, top_k=args.top_k), indent=2))
+        print(
+            json.dumps(index.export_results(args.query, top_k=args.top_k, mode=args.mode), indent=2)
+        )
     else:
         print(json.dumps(asdict(answer_query(index, args.query, top_k=args.top_k)), indent=2))
 

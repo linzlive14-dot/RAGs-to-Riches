@@ -19,12 +19,15 @@ dist/
 htmlcov/
 data/*.sqlite3
 data/*.sqlite3-*
+data/*.faiss
+data/*.faiss.tmp
+data/*.npz
+data/models/
 evaluation/report.json
 evaluation/ablation.json
 
 # Local project and demo documents
 demo-script.md
-deployed.md
 project_plan.md
 rubric-audit.md
 project-documents/
@@ -33,3 +36,6 @@ project-documents/
 .DS_Store
 .idea/
 .vscode/
+
+# Session marker written by the embedding model download
+*.ses

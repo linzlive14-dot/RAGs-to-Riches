@@ -34,6 +34,8 @@ class Answer:
 
 
 def _best_sentence(result: SearchResult, query: str) -> str:
+    if result.passage:
+        return result.passage
     terms = {term for term in re.findall(r"[a-z0-9]+", query.lower()) if len(term) >= 4}
     sentences = [sentence.strip() for sentence in SENTENCE_RE.split(result.text) if sentence.strip()]
     if not sentences:
@@ -72,7 +74,10 @@ def answer_query(index: PolicyIndex, query: str, *, top_k: int = 5) -> Answer:
 
     normalized = validate_query(query)
     results = index.search(normalized, top_k=top_k)
-    if not results or not has_sufficient_evidence(normalized, [result.text for result in results]):
+    similarities = [result.similarity for result in results if result.similarity is not None]
+    if not results or not has_sufficient_evidence(
+        normalized, [result.text for result in results], similarities=similarities
+    ):
         return Answer(text=REFUSAL, citations=(), grounded=False, label="Escalation")
 
     citations = citations_for(results)

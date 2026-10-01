@@ -8,11 +8,13 @@ from rag.index import PolicyIndex
 from rag.ingestion import chunk_documents, load_documents
 
 
-@pytest.fixture()
-def policy_index(tmp_path: Path) -> PolicyIndex:
-    policy_dir = Path(__file__).parents[1] / "policies"
-    chunks = chunk_documents(load_documents(policy_dir), chunk_size=100, overlap=20)
-    index = PolicyIndex(tmp_path / "policy.sqlite3")
+POLICY_DIR = Path(__file__).parents[1] / "policies"
+
+
+@pytest.fixture(scope="module")
+def policy_index(tmp_path_factory: pytest.TempPathFactory) -> PolicyIndex:
+    chunks = chunk_documents(load_documents(POLICY_DIR), chunk_size=100, overlap=20)
+    index = PolicyIndex(tmp_path_factory.mktemp("index") / "policy.sqlite3")
     index.build(chunks, configuration={"chunk_size": 100, "overlap": 20})
     return index
 
@@ -22,8 +24,12 @@ def test_index_manifest_and_retrieval_are_reproducible(policy_index: PolicyIndex
     first = policy_index.search("fully remote tenure location approval", top_k=4)
     second = policy_index.search("fully remote tenure location approval", top_k=4)
 
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["chunk_count"] > 8
+    assert manifest["configuration"]["embedding_model"] == "BAAI/bge-small-en-v1.5"
+    assert manifest["configuration"]["embedding_dimensions"] == 384
+    assert "vector_chunk_ids" not in manifest["configuration"]
+    assert policy_index.has_vectors()
     assert first == second
     assert first[0].source == "remote-work.md"
     assert first[0].metadata().keys() == {
@@ -68,3 +74,44 @@ def test_prompt_injection_query_is_rejected(policy_index: PolicyIndex) -> None:
 def test_search_limits_are_enforced(policy_index: PolicyIndex) -> None:
     with pytest.raises(ValueError):
         policy_index.search("PTO", top_k=21)
+
+
+@pytest.mark.parametrize("mode", ["bm25", "vector", "hybrid"])
+def test_every_mode_finds_keyword_queries(policy_index: PolicyIndex, mode: str) -> None:
+    results = policy_index.search("PTO carryover cap hours", top_k=3, mode=mode)  # type: ignore[arg-type]
+
+    assert results
+    assert results[0].source == "paid-time-off.md"
+
+
+def test_embeddings_recover_paraphrases_that_keywords_miss(policy_index: PolicyIndex) -> None:
+    query = "I'm having a baby, how much time off do I get?"
+    keyword = policy_index.search(query, top_k=3, mode="bm25")
+    vector = policy_index.search(query, top_k=3, mode="vector")
+
+    assert "leave-of-absence.md" not in {result.source for result in keyword}
+    assert vector[0].source == "leave-of-absence.md"
+
+
+def test_source_filter_applies_to_both_rankings(policy_index: PolicyIndex) -> None:
+    for mode in ("bm25", "vector", "hybrid"):
+        results = policy_index.search(
+            "approval required before travel",
+            top_k=5,
+            sources=["remote-work.md"],
+            mode=mode,  # type: ignore[arg-type]
+        )
+        assert results
+        assert {result.source for result in results} == {"remote-work.md"}
+
+
+def test_keyword_only_index_falls_back_to_bm25(tmp_path: Path) -> None:
+    chunks = chunk_documents(load_documents(POLICY_DIR), chunk_size=100, overlap=20)
+    index = PolicyIndex(tmp_path / "keyword.sqlite3")
+    index.build(chunks, configuration={"chunk_size": 100, "overlap": 20}, embed=False)
+
+    assert not index.has_vectors()
+    assert "embedding_model" not in index.manifest()["configuration"]
+    assert index.search("PTO carryover", top_k=2, mode="hybrid") == index.search(
+        "PTO carryover", top_k=2, mode="bm25"
+    )

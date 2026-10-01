@@ -42,6 +42,37 @@ def test_mcp_tools_are_discoverable_and_callable() -> None:
     asyncio.run(scenario())
 
 
+def test_compliance_uses_pinned_as_of_date_and_txt_sections() -> None:
+    async def scenario() -> None:
+        async with HRMCPClient(env={"HR_AS_OF_DATE": "2026-09-23"}) as client:
+            pto = await client.call_tool(
+                "check_policy_compliance",
+                {"workflow": "pto", "employee_id": "SYN-1002", "requested_hours": 24},
+            )
+            assert pto["as_of"] == "2026-09-23"
+            assert pto["details"]["requested_workdays"] == 3
+            assert pto["details"]["required_notice_calendar_days"] == 10
+            section = await client.call_tool(
+                "get_policy_section",
+                {"source": "business-travel-and-expenses.txt", "section": "EXPENSE REPORTS"},
+            )
+            assert section["found"] is True
+            assert "15 calendar days" in section["text"]
+            filtered = await client.call_tool(
+                "search_policy_documents",
+                {"query": "remote work", "top_k": 3, "sources": ["information-security.md"]},
+            )
+            assert {item["source"] for item in filtered["results"]} == {"information-security.md"}
+
+    asyncio.run(scenario())
+
+
+def test_combined_citation_markers_are_split() -> None:
+    from app.llm import split_combined_markers
+
+    assert split_combined_markers("Approval is required [P1, P2].") == "Approval is required [P1] [P2]."
+
+
 def test_remote_work_and_pto_workflows_use_mcp_tools() -> None:
     async def scenario() -> None:
         async with HRMCPClient() as client:
@@ -54,12 +85,18 @@ def test_remote_work_and_pto_workflows_use_mcp_tools() -> None:
                 )
             )
             assert remote.status == "completed"
-            assert remote.citations
+            assert {"remote-work.md", "information-security.md"} <= {
+                citation.source for citation in remote.citations
+            }
             assert "[P1]" in remote.answer
+            assert "**Policy:**" in remote.answer
+            assert "**Recommended next step:**" in remote.answer
             assert [step.tool for step in remote.trace if step.tool] == [
                 "lookup_employee_profile",
-                "search_policy_documents",
                 "check_policy_compliance",
+                "search_policy_documents",
+                "search_policy_documents",
+                "get_policy_section",
             ]
 
             pto = await agent.run(
@@ -70,12 +107,55 @@ def test_remote_work_and_pto_workflows_use_mcp_tools() -> None:
                 )
             )
             assert pto.status == "completed"
+            assert "at least 5 calendar days" in pto.answer
             assert [step.tool for step in pto.trace if step.tool] == [
                 "lookup_employee_profile",
                 "check_pto_balance",
-                "search_policy_documents",
                 "check_policy_compliance",
+                "search_policy_documents",
+                "search_policy_documents",
+                "get_policy_section",
             ]
+
+    asyncio.run(scenario())
+
+
+def test_failed_checks_retrieve_the_rule_behind_each_failure() -> None:
+    async def scenario() -> None:
+        async with HRMCPClient() as client:
+            result = await HRAgent(client).chat(
+                ChatRequest(message="Can SYN-1001 work remotely from London?")
+            )
+        assert result.status == "escalated"
+        snippets = " ".join(citation.snippet for citation in result.citations)
+        assert "International remote work is prohibited" in snippets
+        assert "payroll-and-working-time.md" in {citation.source for citation in result.citations}
+        searches = [step for step in result.trace if step.tool == "search_policy_documents"]
+        assert all(step.safe_arguments["sources"] for step in searches)
+
+    asyncio.run(scenario())
+
+
+def test_benefits_triage_uses_benefits_status_and_policy() -> None:
+    async def scenario() -> None:
+        async with HRMCPClient() as client:
+            agent = HRAgent(client)
+            enrolled = await agent.chat(
+                ChatRequest(message="I am SYN-1001. Am I enrolled in health benefits?")
+            )
+            missed = await agent.chat(
+                ChatRequest(message="I am SYN-1002. Am I eligible for health benefits?")
+            )
+        assert enrolled.workflow == "benefits"
+        assert enrolled.status == "completed"
+        assert [step.tool for step in enrolled.trace if step.tool][:3] == [
+            "lookup_employee_profile",
+            "lookup_benefits_status",
+            "check_policy_compliance",
+        ]
+        assert missed.status == "escalated"
+        assert "2026-09-02" in missed.answer
+        assert all(citation.source == "benefits.md" for citation in missed.citations)
 
     asyncio.run(scenario())
 
@@ -199,6 +279,104 @@ def test_workflow_clarifies_and_gates_mock_action_confirmation() -> None:
             assert gated.trace[-1].status == "confirmation_required"
 
     asyncio.run(scenario())
+
+
+def test_paraphrased_requests_route_to_workflows() -> None:
+    from app.intent import deterministic_intent
+
+    wfh = deterministic_intent("SYN-1005 here. Could I work from home in California?")
+    assert (wfh.intent, wfh.requested_location_id) == ("remote_work", "US-CA")
+    hours_off = deterministic_intent("I'm SYN-1001, can I take 80 hours off?")
+    assert (hours_off.intent, hours_off.requested_hours) == ("pto", 80.0)
+    follow_up = deterministic_intent(
+        "PTO, 8 hours please", {"employee_id": "SYN-1001"}
+    )
+    assert (follow_up.intent, follow_up.employee_id) == ("pto", "SYN-1001")
+
+
+def test_request_naming_two_workflows_asks_which_first() -> None:
+    async def scenario() -> None:
+        async with HRMCPClient() as client:
+            result = await HRAgent(client).chat(
+                ChatRequest(message="I'm SYN-1001. I want PTO and to work remotely. Can I?")
+            )
+            assert result.status == "needs_clarification"
+            assert "remote work or PTO" in result.answer
+            assert all(step.tool is None for step in result.trace)
+            assert result.context.employee_id == "SYN-1001"
+
+    asyncio.run(scenario())
+
+
+def test_policy_questions_are_grounded_by_meaning_not_shared_words() -> None:
+    async def scenario() -> None:
+        async with HRMCPClient() as client:
+            agent = HRAgent(client)
+            laptop = await agent.chat(ChatRequest(message="My laptop was stolen. Who do I tell?"))
+            assert laptop.status == "completed"
+            assert laptop.citations[0].source == "information-security.md"
+            assert "immediately" in laptop.citations[0].snippet
+
+            espresso = await agent.chat(
+                ChatRequest(message="What is the warranty on the office espresso machine?")
+            )
+            assert espresso.status == "escalated"
+            assert espresso.citations == []
+
+            raw = await client.call_tool(
+                "search_policy_documents", {"query": "stolen laptop", "top_k": 2}
+            )
+            first = raw["results"][0]
+            assert 0 < first["similarity"] <= 1
+            assert first["passage"] in first["text"]
+
+    asyncio.run(scenario())
+
+
+def test_agent_discovers_tools_and_previews_outputs_in_trace() -> None:
+    async def scenario() -> None:
+        async with HRMCPClient() as client:
+            result = await HRAgent(client).chat(
+                ChatRequest(message="I am SYN-1001. Can I work remotely from New York?")
+            )
+        discover = [step for step in result.trace if step.state == "discover"]
+        assert len(discover) == 1
+        assert "lookup_employee_profile" in discover[0].output_preview["tools"]
+        previews = {step.tool: step.output_preview for step in result.trace if step.tool}
+        assert previews["lookup_employee_profile"]["remote_capability"] == "fully_remote"
+        assert previews["check_policy_compliance"]["decision"] == "eligible_for_review"
+        assert previews["search_policy_documents"]["results"][0]["source"]
+
+    asyncio.run(scenario())
+
+
+def test_missing_required_tool_escalates_without_calling_tools() -> None:
+    async def scenario() -> None:
+        async with HRMCPClient() as client:
+            result = await HRAgent(client, disabled_tools={"check_pto_balance"}).chat(
+                ChatRequest(message="I am SYN-1002. Can I take 8 hours of PTO?")
+            )
+        assert result.status == "escalated"
+        assert "check_pto_balance" in result.answer
+        assert [step.tool for step in result.trace if step.tool] == []
+
+    asyncio.run(scenario())
+
+
+def test_mcp_outage_is_reported_as_a_safe_escalation() -> None:
+    class DeadServer:
+        async def list_tool_schemas(self) -> list[dict[str, object]]:
+            raise ConnectionError("server exited")
+
+        async def call_tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+            raise ConnectionError("server exited")
+
+    result = asyncio.run(
+        HRAgent(DeadServer()).chat(ChatRequest(message="Can I use PTO during parental leave?"))
+    )
+    assert result.status == "escalated"
+    assert "unavailable" in result.answer
+    assert any(step.state == "discover" and step.status == "error" for step in result.trace)
 
 
 def test_confirmed_action_only_writes_to_configured_synthetic_store(tmp_path: Path) -> None:

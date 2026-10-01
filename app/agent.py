@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Any, Literal, Protocol
 
@@ -13,6 +14,8 @@ from rag.guardrails import has_sufficient_evidence
 
 
 class ToolClient(Protocol):
+    async def list_tool_schemas(self) -> list[dict[str, Any]]: ...
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]: ...
 
 
@@ -32,12 +35,97 @@ class IntentExtractor(Protocol):
 class Workflow(StrEnum):
     REMOTE_WORK = "remote_work"
     PTO = "pto"
+    BENEFITS = "benefits"
     POLICY_QA = "policy_qa"
     UNSUPPORTED = "unsupported"
 
 
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+STRUCTURED_WORKFLOWS = {Workflow.REMOTE_WORK, Workflow.PTO, Workflow.BENEFITS}
+
+RECORD_TOOLS = {Workflow.PTO: "check_pto_balance", Workflow.BENEFITS: "lookup_benefits_status"}
+
+CHECK_DESCRIPTIONS = {
+    "180_day_tenure": "at least 180 days of employment",
+    "remote_capable_role": "a role classified as fully remote-capable",
+    "performance": "a Meets Expectations or higher rating",
+    "no_final_warning": "no active final written warning",
+    "supported_location": "a location supported for regular remote work",
+    "domestic_location": "a domestic location",
+    "covered_employee": "regular full- or part-time status",
+    "balance_or_possible_first_year_exception": "enough available PTO",
+    "benefits_eligible_schedule": "a regular schedule of 30 or more hours",
+    "enrollment_complete_or_window_open": "completed or still-open initial enrollment",
+}
+
+
+LOCATION_QUERY = (
+    "regular remote employment location register California New York Texas Florida London"
+)
+WORKFLOW_LABELS = {"remote_work": "remote work", "pto": "PTO", "benefits": "benefits"}
+TERM_RE = re.compile(r"[a-z0-9]+")
+
+
+FAILED_CHECK_SEARCHES = {
+    "180_day_tenure": (
+        "remote-work.md",
+        "fully remote arrangement requires 180 calendar days waiting period waived",
+    ),
+    "remote_capable_role": (
+        "remote-work.md",
+        "role must be classified as remote-capable in the job profile",
+    ),
+    "performance": ("remote-work.md", "current performance rating Meets Expectations or higher"),
+    "no_final_warning": ("remote-work.md", "no active final written warning"),
+    "supported_location": (
+        "remote-work.md",
+        "regular remote employment supported only locations listed active register",
+    ),
+    "domestic_location": (
+        "remote-work.md",
+        "international remote work prohibited unless Legal Information Security Payroll written approval",
+    ),
+    "covered_employee": ("paid-time-off.md", "covered employees regular full-time part-time accrue"),
+    "balance_or_possible_first_year_exception": (
+        "paid-time-off.md",
+        "negative PTO first-year planned absence manager HR approval",
+    ),
+    "benefits_eligible_schedule": (
+        "benefits.md",
+        "scheduled 20 to 29 hours employee assistance program voluntary benefits",
+    ),
+    "enrollment_complete_or_window_open": (
+        "benefits.md",
+        "no election made employer-paid default wait annual enrollment qualifying life event",
+    ),
+}
+
+
+class RetrievalPlan(BaseModel):
+    """Targeted (source, query, top_k) searches plus the section the answer rests on."""
+
+    searches: list[tuple[str, str, int]]
+    section: tuple[str, str]
+
+
+def supporting_sentence(text: str, query: str, *, max_characters: int = 300) -> str:
+    """Return the sentence in a chunk that shares the most terms with the query."""
+
+    terms = {term for term in TERM_RE.findall(query.lower()) if len(term) >= 4}
+    sentences = [part.strip() for part in SENTENCE_END.split(text) if part.strip()]
+    if not sentences:
+        return text[:max_characters].rstrip()
+    best = max(
+        enumerate(sentences),
+        key=lambda item: (len(terms & set(TERM_RE.findall(item[1].lower()))), -item[0]),
+    )[1]
+    return best if len(best) <= max_characters else best[: max_characters - 1].rstrip() + "…"
+
+
 class AgentState(StrEnum):
     CLASSIFY = "classify"
+    DISCOVER = "discover"
     RETRIEVE = "retrieve"
     VALIDATE = "validate"
     CONFIRM = "confirm"
@@ -58,8 +146,8 @@ class WorkflowRequest(BaseModel):
     @field_validator("workflow")
     @classmethod
     def _structured_workflow(cls, value: Workflow) -> Workflow:
-        if value not in {Workflow.REMOTE_WORK, Workflow.PTO}:
-            raise ValueError("workflow must be remote_work or pto")
+        if value not in STRUCTURED_WORKFLOWS:
+            raise ValueError("workflow must be remote_work, pto, or benefits")
         return value
 
 
@@ -97,6 +185,7 @@ class TraceStep(BaseModel):
     safe_arguments: dict[str, Any] = Field(default_factory=dict)
     status: Literal["ok", "error", "confirmation_required", "skipped"] = "ok"
     result_summary: str
+    output_preview: dict[str, Any] = Field(default_factory=dict)
     sources: list[str] = Field(default_factory=list)
 
 
@@ -125,10 +214,160 @@ class HRAgent:
         tools: ToolClient,
         synthesizer: AnswerSynthesizer | None = None,
         intent_extractor: IntentExtractor | None = None,
+        disabled_tools: set[str] | None = None,
     ) -> None:
         self.tools = tools
         self.synthesizer = synthesizer
         self.intent_extractor = intent_extractor
+        self.disabled_tools = frozenset(disabled_tools or ())
+        self._discovered: list[str] | None = None
+
+    async def _discover(self, trace: list[TraceStep]) -> set[str]:
+        """List the MCP server's tools once per agent and record them in the trace."""
+
+        first_time = self._discovered is None
+        if self._discovered is None:
+            try:
+                schemas = await self.tools.list_tool_schemas()
+            except Exception as error:
+                trace.append(
+                    TraceStep(
+                        state=AgentState.DISCOVER,
+                        status="error",
+                        result_summary=f"{type(error).__name__}: MCP tool discovery failed",
+                    )
+                )
+                raise
+            self._discovered = sorted(schema["name"] for schema in schemas)
+        available = [name for name in self._discovered if name not in self.disabled_tools]
+        verb = "Discovered" if first_time else "Using"
+        trace.append(
+            TraceStep(
+                state=AgentState.DISCOVER,
+                result_summary=f"{verb} {len(available)} MCP tools from the HR server",
+                output_preview={"tools": available},
+            )
+        )
+        return set(available)
+
+    async def _missing_tools(
+        self, trace: list[TraceStep], required: list[str]
+    ) -> list[str] | None:
+        """Return required tools the server does not expose, or None if discovery failed."""
+
+        try:
+            available = await self._discover(trace)
+        except Exception:
+            return None
+        return [name for name in required if name not in available]
+
+    def _tools_unavailable(
+        self,
+        workflow: Workflow,
+        trace: list[TraceStep],
+        missing: list[str] | None,
+        context: ChatContext | None = None,
+    ) -> WorkflowResult:
+        if missing is None:
+            answer = "The HR tool server is unavailable. No action was taken; please try again or contact HR."
+            summary = "Escalated because MCP tool discovery failed"
+        else:
+            answer = (
+                "A required HR tool is unavailable ("
+                + ", ".join(missing)
+                + "). No action was taken; please contact HR."
+            )
+            summary = "Escalated because required MCP tools are missing: " + ", ".join(missing)
+        trace.append(TraceStep(state=AgentState.ESCALATE, status="skipped", result_summary=summary))
+        return WorkflowResult(
+            workflow=workflow,
+            status="escalated",
+            answer=answer,
+            trace=trace,
+            context=context or ChatContext(workflow=workflow),
+        )
+
+    @staticmethod
+    def _preview(tool: str, result: dict[str, Any]) -> dict[str, Any]:
+        """Keep the decision-relevant fields of a tool result for the trace."""
+
+        if result.get("found") is False:
+            return {"found": False, "reason": result.get("reason")}
+        if tool == "lookup_employee_profile":
+            employee = result.get("employee", {})
+            keys = (
+                "employee_id",
+                "role",
+                "employment_type",
+                "hire_date",
+                "work_location_id",
+                "remote_capability",
+                "performance_status",
+                "active_final_warning",
+            )
+            return {key: employee.get(key) for key in keys}
+        if tool == "check_pto_balance":
+            balance = result.get("balance", {})
+            return {
+                key: balance.get(key)
+                for key in ("available_hours", "accrued_hours", "approved_future_hours")
+            }
+        if tool == "lookup_benefits_status":
+            status = result.get("benefits_status", {})
+            return {
+                key: status.get(key)
+                for key in ("eligibility", "medical", "coverage_effective_date", "next_action")
+            }
+        if tool == "search_policy_documents":
+            return {
+                "results": [
+                    {
+                        "source": item.get("source"),
+                        "section": item.get("section"),
+                        "score": item.get("score"),
+                    }
+                    for item in result.get("results", [])[:5]
+                    if isinstance(item, dict)
+                ]
+            }
+        if tool == "get_policy_section":
+            return {
+                "source": result.get("source"),
+                "section": result.get("section"),
+                "characters": len(str(result.get("text", ""))),
+            }
+        if tool == "list_work_locations":
+            locations = [item for item in result.get("locations", []) if isinstance(item, dict)]
+            return {
+                "supported": [
+                    item["location_id"]
+                    for item in locations
+                    if item.get("regular_remote_employment_supported")
+                ],
+                "not_supported": [
+                    item["location_id"]
+                    for item in locations
+                    if not item.get("regular_remote_employment_supported")
+                ],
+            }
+        if tool == "check_policy_compliance":
+            return {
+                "decision": result.get("decision"),
+                "checks": {
+                    check["name"]: check["passed"]
+                    for check in result.get("checks", [])
+                    if isinstance(check, dict)
+                },
+            }
+        if tool == "create_mock_hr_ticket":
+            if result.get("created"):
+                return {"created": True, "ticket_id": result.get("ticket", {}).get("ticket_id")}
+            return {
+                "created": False,
+                "confirmation_required": bool(result.get("confirmation_required")),
+                "proposed_action": result.get("proposed_action"),
+            }
+        return {}
 
     async def _call(
         self,
@@ -166,6 +405,7 @@ class HRAgent:
                 tool=tool,
                 safe_arguments=safe_arguments,
                 result_summary=self._summary(tool, result),
+                output_preview=self._preview(tool, result),
                 sources=sources,
             )
         )
@@ -190,14 +430,87 @@ class HRAgent:
             if result.get("rejected"):
                 return str(result.get("reason") or "Mock ticket was rejected")
             return "Mock ticket awaiting explicit confirmation"
+        if tool == "lookup_employee_profile":
+            employee = result.get("employee", {})
+            return f"Found {employee.get('employee_id')}: {employee.get('role')}"
+        if tool == "check_pto_balance":
+            return f"Available PTO: {result.get('balance', {}).get('available_hours')} hours"
+        if tool == "lookup_benefits_status":
+            return f"Benefits eligibility: {result.get('benefits_status', {}).get('eligibility')}"
+        if tool == "get_policy_section":
+            return f"Read section '{result.get('section')}' of {result.get('source')}"
         return f"{tool} returned a synthetic record"
 
     @staticmethod
-    def _citations(policy_result: dict[str, Any], *, limit: int = 3) -> list[Citation]:
+    def _retrieval_plan(
+        request: WorkflowRequest,
+        employee: dict[str, Any],
+        compliance: dict[str, Any],
+    ) -> RetrievalPlan:
+        """Choose source-filtered searches from the workflow and the compliance outcome.
+
+        Each failed check gets its own search so the answer can cite the rule
+        behind it; the remaining searches cover the workflow's related policies.
+        """
+
+        searches: list[tuple[str, str, int]] = [
+            (*FAILED_CHECK_SEARCHES[check["name"]], 1)
+            for check in compliance.get("checks", [])
+            if isinstance(check, dict)
+            and not check.get("passed", True)
+            and check.get("name") in FAILED_CHECK_SEARCHES
+        ]
+        if request.workflow == Workflow.REMOTE_WORK:
+            searches += [
+                (
+                    "remote-work.md",
+                    "fully remote arrangement requires 180 calendar days remote-capable performance",
+                    1,
+                ),
+                ("information-security.md", "remote workers private network VPN devices", 1),
+            ]
+            if (compliance.get("details") or {}).get("location_change"):
+                searches.append(
+                    ("payroll-and-working-time.md", "address changes tax forms benefits", 1)
+                )
+            section = ("remote-work.md", "Request and approval process")
+        elif request.workflow == Workflow.PTO:
+            searches += [
+                (
+                    "paid-time-off.md",
+                    "requests scheduled workdays submitted at least calendar days in advance",
+                    1,
+                ),
+                ("paid-time-off.md", "manager approves requests based on available balance", 1),
+            ]
+            section = ("paid-time-off.md", "Requesting planned time")
+        else:
+            searches.append(
+                (
+                    "benefits.md",
+                    "eligible medical coverage scheduled 30 hours initial enrollment hire date",
+                    2,
+                )
+            )
+            section = ("benefits.md", "Enrollment")
+        return RetrievalPlan(searches=searches, section=section)
+
+    @staticmethod
+    def _citations(
+        policy_result: dict[str, Any],
+        *,
+        limit: int = 3,
+        distinct: Literal["source", "snippet"] = "source",
+        query: str = "",
+    ) -> list[Citation]:
         citations: list[Citation] = []
         seen: set[str] = set()
         for result in policy_result.get("results", []):
-            key = result["source"]
+            snippet = str(result.get("passage") or "") or supporting_sentence(
+                str(result.get("text") or result["snippet"]),
+                str(result.get("query") or query),
+            )
+            key = result["source"] if distinct == "source" else snippet
             if key in seen:
                 continue
             seen.add(key)
@@ -206,7 +519,7 @@ class HRAgent:
                     citation_id=f"P{len(citations) + 1}",
                     source=result["source"],
                     section=result["section"],
-                    snippet=result["snippet"],
+                    snippet=snippet,
                 )
             )
             if len(citations) == limit:
@@ -250,23 +563,12 @@ class HRAgent:
                 evidence.get("reason")
                 or "More information is required before I can check eligibility."
             )
-        name = evidence.get("employee_name") or "The employee"
-        workflow = str(evidence.get("workflow", "request")).replace("_", " ")
-        if decision == "eligible_for_review":
-            return (
-                f"{name} meets the automated prerequisites for {workflow} review, "
-                f"but manager/HR approval is still required. {references}"
-            ).strip()
-        if decision == "escalate":
-            failed = [
-                check["name"]
-                for check in evidence.get("checks", [])
-                if isinstance(check, dict) and not check.get("passed", True)
-            ]
-            return (
-                "The request needs HR review because these checks did not pass: "
-                f"{', '.join(failed) or 'manual review required'}. {references}"
-            ).strip()
+        if decision in {"eligible_for_review", "escalate"}:
+            return HRAgent._labelled_answer(
+                HRAgent._policy_lines(citations),
+                HRAgent._records_line(evidence),
+                HRAgent._next_step(evidence),
+            )
         supported = evidence.get("supported_regular_remote_locations") or []
         if supported:
             listed = ", ".join(str(item) for item in supported)
@@ -274,9 +576,88 @@ class HRAgent:
                 f"Regular remote employment is supported in {listed}. {references}"
             ).strip()
         if citations:
-            claims = " ".join(f"{item.snippet} [{item.citation_id}]" for item in citations)
-            return f"Policy guidance: {claims}"
+            return HRAgent._labelled_answer(
+                HRAgent._policy_lines(citations),
+                None,
+                "Contact HR for a decision about your specific situation.",
+            )
         return "I need a more specific HR policy question before I can help."
+
+    @staticmethod
+    def _labelled_answer(policy: str, records: str | None, next_step: str | None) -> str:
+        parts = [f"**Policy:** {policy}"]
+        if records:
+            parts.append(f"**Your records:** {records}")
+        if next_step:
+            parts.append(f"**Recommended next step:** {next_step}")
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _policy_lines(citations: list[Citation]) -> str:
+        return " ".join(f"{citation.snippet} [{citation.citation_id}]" for citation in citations)
+
+    @staticmethod
+    def _records_line(evidence: dict[str, Any]) -> str:
+        name = evidence.get("employee_name") or "The employee"
+        workflow = WORKFLOW_LABELS.get(str(evidence.get("workflow")), "this")
+        checks = [check for check in evidence.get("checks", []) if isinstance(check, dict)]
+        records = evidence.get("records") or {}
+        if evidence.get("decision") == "eligible_for_review" and evidence.get("workflow") == "benefits":
+            return (
+                f"{name} is benefits-eligible with medical coverage "
+                f"{str(records.get('medical', 'on file')).replace('_', ' ')}, effective "
+                f"{records.get('coverage_effective_date')}."
+            )
+        if evidence.get("decision") == "eligible_for_review":
+            if evidence.get("workflow") == "pto":
+                name = f"{name} has {records.get('available_hours')} available hours and"
+            met = ", ".join(CHECK_DESCRIPTIONS.get(c["name"], c["name"]) for c in checks)
+            return (
+                f"{name} meets the automated prerequisites for {workflow} review ({met}). "
+                "This is not an approval; manager/HR approval is still required."
+            )
+        failed = [
+            CHECK_DESCRIPTIONS.get(c["name"], c["name"]) for c in checks if not c.get("passed", True)
+        ]
+        return (
+            f"The {workflow} request needs HR review because these checks did not pass: "
+            f"{', '.join(failed) or 'manual review required'}."
+        )
+
+    @staticmethod
+    def _next_step(evidence: dict[str, Any]) -> str:
+        workflow = evidence.get("workflow")
+        eligible = evidence.get("decision") == "eligible_for_review"
+        details = evidence.get("details") or {}
+        if workflow == Workflow.PTO.value:
+            if eligible:
+                notice = details.get("required_notice_calendar_days")
+                return (
+                    f"Submit the request in the HR system at least {notice} calendar days ahead. "
+                    "It is not approved until the HR system shows your manager's approval."
+                )
+            return "Talk with your manager and HR before making plans that depend on this time off."
+        if workflow == Workflow.BENEFITS.value:
+            if eligible:
+                return "Review your elections in the benefits portal and report any error to Benefits."
+            failed = {
+                check["name"]
+                for check in evidence.get("checks", [])
+                if isinstance(check, dict) and not check.get("passed", True)
+            }
+            if "benefits_eligible_schedule" in failed:
+                return "Contact Benefits about the employee assistance program and voluntary benefits."
+            deadline = details.get("initial_enrollment_deadline")
+            return (
+                f"The initial enrollment deadline ({deadline}) has passed. Contact Benefits about "
+                "annual enrollment or a qualifying life event."
+            )
+        if eligible:
+            return (
+                "Submit a remote work request in the HR system with your schedule, work address, "
+                "start date, and coverage plan, and wait for a written decision."
+            )
+        return "Talk with your manager or HR before making plans; HR can explain your options."
 
     def _context_for(
         self,
@@ -414,6 +795,33 @@ class HRAgent:
                 terminal_state=AgentState.ESCALATE,
             )
 
+        if len(parsed.candidates) > 1:
+            options = " or ".join(WORKFLOW_LABELS[name] for name in parsed.candidates)
+            trace.append(
+                TraceStep(
+                    state=AgentState.ESCALATE,
+                    status="skipped",
+                    result_summary=f"Clarification required: the message mentions {options}",
+                )
+            )
+            return await self._finish(
+                workflow=Workflow.POLICY_QA,
+                status="needs_clarification",
+                trace=trace,
+                evidence={
+                    "workflow": Workflow.POLICY_QA.value,
+                    "decision": "needs_clarification",
+                    "reason": (
+                        f"Your message mentions {options}. Which one should I check first? "
+                        "I'll handle one request at a time."
+                    ),
+                    "answer_instruction": "Ask which request to handle first. Do not answer either.",
+                    "user_message": request.message,
+                },
+                context=ChatContext(employee_id=parsed.employee_id),
+                terminal_state=AgentState.ESCALATE,
+            )
+
         if (
             asks_for_location_list(request.message)
             and not parsed.requested_location_id
@@ -499,13 +907,7 @@ class HRAgent:
             trace,
             AgentState.RETRIEVE,
             "search_policy_documents",
-            {
-                "query": (
-                    "regular remote employment location register California "
-                    "New York Texas Florida London"
-                ),
-                "top_k": 8,
-            },
+            {"query": LOCATION_QUERY, "top_k": 8},
         )
         return locations, policies
 
@@ -515,6 +917,11 @@ class HRAgent:
         trace: list[TraceStep],
         employee_id: str | None,
     ) -> WorkflowResult:
+        missing_tools = await self._missing_tools(
+            trace, ["list_work_locations", "search_policy_documents"]
+        )
+        if missing_tools != []:
+            return self._tools_unavailable(Workflow.POLICY_QA, trace, missing_tools)
         try:
             locations, policies = await self._load_location_register(trace)
         except Exception:
@@ -526,7 +933,7 @@ class HRAgent:
                 context=ChatContext(workflow=Workflow.POLICY_QA),
             )
         supported, others = self._split_locations(locations)
-        citations = self._citations(policies)
+        citations = self._citations(policies, query=LOCATION_QUERY)
         return await self._finish(
             workflow=Workflow.POLICY_QA,
             status="completed",
@@ -560,6 +967,12 @@ class HRAgent:
         message: str,
     ) -> WorkflowResult:
         place = parsed.unrecognized_location or "That place"
+        required = ["list_work_locations", "search_policy_documents"]
+        if parsed.employee_id:
+            required.insert(0, "lookup_employee_profile")
+        missing_tools = await self._missing_tools(trace, required)
+        if missing_tools != []:
+            return self._tools_unavailable(Workflow.REMOTE_WORK, trace, missing_tools)
         try:
             if parsed.employee_id:
                 await self._call(
@@ -581,7 +994,7 @@ class HRAgent:
                 ),
             )
         supported, others = self._split_locations(locations)
-        citations = self._citations(policies)
+        citations = self._citations(policies, query=LOCATION_QUERY)
         return await self._finish(
             workflow=Workflow.REMOTE_WORK,
             status="escalated",
@@ -619,6 +1032,9 @@ class HRAgent:
         )
 
     async def _policy_qa(self, message: str, trace: list[TraceStep]) -> WorkflowResult:
+        missing_tools = await self._missing_tools(trace, ["search_policy_documents"])
+        if missing_tools != []:
+            return self._tools_unavailable(Workflow.POLICY_QA, trace, missing_tools)
         try:
             policies = await self._call(
                 trace,
@@ -634,13 +1050,21 @@ class HRAgent:
                 trace=trace,
                 context=ChatContext(workflow=Workflow.POLICY_QA),
             )
-        texts = [
-            str(item.get("text") or item.get("snippet") or "")
-            for item in policies.get("results", [])
-            if isinstance(item, dict)
+        items = [item for item in policies.get("results", []) if isinstance(item, dict)]
+        texts = [str(item.get("text") or item.get("snippet") or "") for item in items]
+        similarities = [
+            float(item["similarity"]) for item in items if item.get("similarity") is not None
         ]
-        grounded = bool(texts) and has_sufficient_evidence(message, texts)
-        citations = self._citations(policies) if grounded else []
+        grounded = bool(texts) and has_sufficient_evidence(
+            message, texts, similarities=similarities
+        )
+        by_passage = {
+            **policies,
+            "results": sorted(
+                items, key=lambda item: -float(item.get("passage_similarity") or 0.0)
+            ),
+        }
+        citations = self._citations(by_passage, query=message) if grounded else []
         status: Literal["completed", "escalated"] = "completed" if grounded else "escalated"
         return await self._finish(
             workflow=Workflow.POLICY_QA,
@@ -712,6 +1136,22 @@ class HRAgent:
                 context=self._context_for(request),
             )
 
+        required = [
+            "lookup_employee_profile",
+            "search_policy_documents",
+            "get_policy_section",
+            "check_policy_compliance",
+        ]
+        if request.workflow in RECORD_TOOLS:
+            required.insert(1, RECORD_TOOLS[request.workflow])
+        if request.create_ticket:
+            required.append("create_mock_hr_ticket")
+        missing_tools = await self._missing_tools(trace, required)
+        if missing_tools != []:
+            return self._tools_unavailable(
+                request.workflow, trace, missing_tools, self._context_for(request)
+            )
+
         employee: dict[str, Any] | None = None
         policies: dict[str, Any] | None = None
         compliance: dict[str, Any] | None = None
@@ -739,27 +1179,16 @@ class HRAgent:
                     },
                     context=self._context_for(request),
                 )
-            if request.workflow == Workflow.REMOTE_WORK:
-                policy_query = (
-                    "fully remote eligibility tenure performance supported location "
-                    "location change request approval"
-                )
-                compliance_arguments = {
-                    "workflow": request.workflow.value,
-                    "employee_id": request.employee_id,
-                    "requested_location_id": request.requested_location_id,
-                }
-            else:
-                policy_query = (
-                    "PTO available balance request notice manager approval protected leave"
-                )
-                balance = await self._call(
+            record: dict[str, Any] | None = None
+            record_tool = RECORD_TOOLS.get(request.workflow)
+            if record_tool is not None:
+                record = await self._call(
                     trace,
                     AgentState.RETRIEVE,
-                    "check_pto_balance",
+                    record_tool,
                     {"employee_id": request.employee_id},
                 )
-                if balance.get("found") is False:
+                if record.get("found") is False:
                     return await self._finish(
                         workflow=request.workflow,
                         status="needs_clarification",
@@ -767,31 +1196,53 @@ class HRAgent:
                         evidence={
                             "workflow": request.workflow.value,
                             "employee_name": employee["employee"]["name"],
-                            "findings": [balance],
+                            "findings": [record],
                             "answer_instruction": (
-                                "Explain the missing PTO record and ask the user to correct the "
-                                "employee ID. Do not say the policy corpus lacks support."
+                                "Explain which synthetic record is missing and ask the user to "
+                                "correct the employee ID. Do not say the policy corpus lacks support."
                             ),
                             "user_message": request.user_message,
                         },
                         context=self._context_for(request),
                     )
-                compliance_arguments = {
-                    "workflow": request.workflow.value,
-                    "employee_id": request.employee_id,
-                    "requested_hours": request.requested_hours,
-                }
-            policies = await self._call(
-                trace,
-                AgentState.RETRIEVE,
-                "search_policy_documents",
-                {"query": policy_query, "top_k": 8},
-            )
+            compliance_arguments: dict[str, Any] = {
+                "workflow": request.workflow.value,
+                "employee_id": request.employee_id,
+            }
+            if request.workflow == Workflow.REMOTE_WORK:
+                compliance_arguments["requested_location_id"] = request.requested_location_id
+            if request.workflow == Workflow.PTO:
+                compliance_arguments["requested_hours"] = request.requested_hours
+
             compliance = await self._call(
                 trace,
                 AgentState.VALIDATE,
                 "check_policy_compliance",
                 compliance_arguments,
+            )
+            plan = self._retrieval_plan(request, employee["employee"], compliance)
+            ranked: list[list[dict[str, Any]]] = []
+            for source, query, top_k in plan.searches:
+                found = await self._call(
+                    trace,
+                    AgentState.RETRIEVE,
+                    "search_policy_documents",
+                    {"query": query, "top_k": top_k, "sources": [source]},
+                )
+                ranked.append([{**item, "query": query} for item in found.get("results", [])])
+            policies = {
+                "results": [
+                    group[rank]
+                    for rank in range(max((len(group) for group in ranked), default=0))
+                    for group in ranked
+                    if rank < len(group)
+                ]
+            }
+            section = await self._call(
+                trace,
+                AgentState.RETRIEVE,
+                "get_policy_section",
+                {"source": plan.section[0], "section": plan.section[1]},
             )
         except Exception:
             return WorkflowResult(
@@ -803,7 +1254,7 @@ class HRAgent:
             )
 
         assert employee is not None and policies is not None and compliance is not None
-        citations = self._citations(policies)
+        citations = self._citations(policies, distinct="snippet", limit=5)
         decision = compliance.get("decision")
         if decision == "needs_clarification":
             status: Literal[
@@ -816,10 +1267,21 @@ class HRAgent:
         evidence = {
             "workflow": request.workflow.value,
             "employee_name": employee["employee"]["name"],
+            "employee": self._preview("lookup_employee_profile", employee),
+            "records": self._preview(record_tool, record) if record_tool and record else {},
             "decision": decision,
             "checks": compliance.get("checks", []),
+            "details": compliance.get("details", {}),
+            "as_of": compliance.get("as_of"),
             "findings": [compliance] if compliance.get("found") is False else [],
             "citations": [citation.model_dump() for citation in citations],
+            "policy_section": {
+                "source": section.get("source"),
+                "section": section.get("section"),
+                "text": str(section.get("text", ""))[:1500],
+            }
+            if section.get("found")
+            else None,
             "grounded": True,
             "user_message": request.user_message,
             "reason": compliance.get("reason"),

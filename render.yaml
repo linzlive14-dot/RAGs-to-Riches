@@ -17,3 +17,10 @@ services:
         value: production
       - key: LOG_LEVEL
         value: INFO
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: dots-studio/dots-3-note-preview:free
+      # Set to bm25 to skip loading the embedding model (about 230 MB less memory).
+      - key: HR_RETRIEVAL_MODE
+        value: hybrid

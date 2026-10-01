@@ -28,9 +28,24 @@ def validate_query(query: str) -> str:
     return normalized
 
 
-def has_sufficient_evidence(query: str, texts: list[str], *, minimum_overlap: int = 2) -> bool:
-    """Require meaningful lexical support before treating retrieval as grounded."""
+MIN_SIMILARITY = 0.62
 
+
+def has_sufficient_evidence(
+    query: str,
+    texts: list[str],
+    *,
+    minimum_overlap: int = 2,
+    similarities: list[float] | None = None,
+) -> bool:
+    """Require meaningful support before treating retrieval as grounded.
+
+    With embeddings, the closest chunk must reach `MIN_SIMILARITY` cosine
+    similarity. Keyword-only indexes fall back to a term-overlap check.
+    """
+
+    if similarities:
+        return max(similarities) >= MIN_SIMILARITY
     stop_words = {
         "about",
         "could",

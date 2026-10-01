@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -58,7 +59,7 @@ def _index() -> PolicyIndex:
         chunks = chunk_documents(load_documents(POLICY_DIR), chunk_size=180, overlap=30)
         index.build(
             chunks,
-            configuration={"chunk_size": 180, "overlap": 30, "retrieval": "sqlite-fts5-bm25"},
+            configuration={"chunk_size": 180, "overlap": 30, "retrieval": "hybrid-bm25-faiss-rrf"},
         )
     return index
 
@@ -86,12 +87,33 @@ def list_work_locations() -> dict[str, Any]:
     return {"found": True, "locations": locations, "synthetic": True}
 
 
-@mcp.tool()
-def search_policy_documents(query: str, top_k: int = 5) -> dict[str, Any]:
-    """Search policy chunks and return ranked text with citation metadata."""
+def _as_of() -> date:
+    """Reference date for tenure and enrollment checks, pinned for reproducibility."""
 
-    results = _index().export_results(query, top_k=top_k)
-    return {"query": query, "results": results, "synthetic": True}
+    configured = os.environ.get("HR_AS_OF_DATE")
+    if configured:
+        return date.fromisoformat(configured)
+    payload = json.loads((DATA_DIR / "pto_balances.json").read_text(encoding="utf-8"))
+    return date.fromisoformat(payload["as_of"])
+
+
+@mcp.tool()
+def search_policy_documents(
+    query: str,
+    top_k: int = 5,
+    sources: list[str] | None = None,
+) -> dict[str, Any]:
+    """Search policy chunks and return ranked text with citation metadata.
+
+    `sources` optionally limits the search to policy file names such as
+    `remote-work.md`.
+    """
+
+    results = _index().export_results(query, top_k=top_k, sources=sources)
+    return {"query": query, "sources": sources, "results": results, "synthetic": True}
+
+
+_TXT_HEADING = r"^([A-Z][A-Z0-9 /&(),'-]{2,80})\s*$"
 
 
 @mcp.tool()
@@ -108,7 +130,8 @@ def get_policy_section(source: str, section: str) -> dict[str, Any]:
             "synthetic": True,
         }
     text = allowed[source].read_text(encoding="utf-8")
-    headings = list(re.finditer(r"^##\s+(.+?)\s*$", text, flags=re.MULTILINE))
+    pattern = r"^##\s+(.+?)\s*$" if source.endswith(".md") else _TXT_HEADING
+    headings = list(re.finditer(pattern, text, flags=re.MULTILINE))
     for position, heading in enumerate(headings):
         if heading.group(1).strip().casefold() != section.strip().casefold():
             continue
@@ -159,9 +182,51 @@ def lookup_benefits_status(employee_id: str) -> dict[str, Any]:
     return {"found": True, "benefits_status": status, "synthetic": True}
 
 
+def _pto_notice_days(requested_hours: float, scheduled_hours: float) -> tuple[int, int]:
+    """Return (workdays requested, calendar days of notice) under the PTO policy."""
+
+    hours_per_day = scheduled_hours / 5 if scheduled_hours else 8
+    workdays = max(1, math.ceil(requested_hours / hours_per_day))
+    if workdays <= 2:
+        return workdays, 5
+    if workdays <= 5:
+        return workdays, 10
+    return workdays, 30
+
+
+def _benefits_checks(employee: dict[str, Any], as_of: date) -> dict[str, Any]:
+    status = _find("benefits_status.json", "statuses", "employee_id", employee["employee_id"])
+    if status is None:
+        missing = _missing_record("employee_id", employee["employee_id"])
+        return {"found": False, "reason": missing["reason"]}
+    hire_date = date.fromisoformat(employee["hire_date"])
+    deadline = hire_date + timedelta(days=30)
+    pending = str(status["medical"]).startswith("pending")
+    return {
+        "found": True,
+        "checks": [
+            {
+                "name": "benefits_eligible_schedule",
+                "passed": employee["employment_type"].startswith("regular")
+                and employee["scheduled_hours"] >= 30,
+            },
+            {
+                "name": "enrollment_complete_or_window_open",
+                "passed": not pending or as_of <= deadline,
+                "detail": f"initial enrollment deadline {deadline.isoformat()}" if pending else None,
+            },
+        ],
+        "details": {
+            "medical": status["medical"],
+            "coverage_effective_date": status["coverage_effective_date"],
+            "initial_enrollment_deadline": deadline.isoformat(),
+        },
+    }
+
+
 @mcp.tool()
 def check_policy_compliance(
-    workflow: Literal["remote_work", "pto"],
+    workflow: Literal["remote_work", "pto", "benefits"],
     employee_id: str,
     requested_location_id: str | None = None,
     requested_hours: float | None = None,
@@ -169,7 +234,9 @@ def check_policy_compliance(
     """Evaluate deterministic policy prerequisites; this is guidance, not approval."""
 
     employee = _find("employees.json", "employees", "employee_id", employee_id)
+    as_of = _as_of()
     checks: list[dict[str, Any]] = []
+    details: dict[str, Any] = {}
     if employee is None:
         missing = _missing_record("employee_id", employee_id)
         return {
@@ -203,7 +270,11 @@ def check_policy_compliance(
                 "reason": missing["reason"],
                 "synthetic": True,
             }
-        tenure_days = (date.today() - date.fromisoformat(employee["hire_date"])).days
+        tenure_days = (as_of - date.fromisoformat(employee["hire_date"])).days
+        details = {
+            "tenure_days": tenure_days,
+            "location_change": requested_location_id != employee["work_location_id"],
+        }
         checks = [
             {"name": "180_day_tenure", "passed": tenure_days >= 180},
             {
@@ -221,6 +292,19 @@ def check_policy_compliance(
             },
             {"name": "domestic_location", "passed": not location["international"]},
         ]
+    elif workflow == "benefits":
+        result = _benefits_checks(employee, as_of)
+        if result["found"] is False:
+            return {
+                "workflow": workflow,
+                "decision": "needs_clarification",
+                "checks": [],
+                "found": False,
+                "reason": result["reason"],
+                "synthetic": True,
+            }
+        checks = result["checks"]
+        details = result["details"]
     else:
         if requested_hours is None or requested_hours <= 0:
             return {
@@ -244,7 +328,13 @@ def check_policy_compliance(
             }
         covered = employee["employment_type"] in {"regular_full_time", "regular_part_time"}
         enough_balance = balance["available_hours"] >= requested_hours
-        first_year = (date.today() - date.fromisoformat(employee["hire_date"])).days < 365
+        first_year = (as_of - date.fromisoformat(employee["hire_date"])).days < 365
+        workdays, notice_days = _pto_notice_days(requested_hours, employee["scheduled_hours"])
+        details = {
+            "available_hours": balance["available_hours"],
+            "requested_workdays": workdays,
+            "required_notice_calendar_days": notice_days,
+        }
         checks = [
             {"name": "covered_employee", "passed": covered},
             {
@@ -261,6 +351,8 @@ def check_policy_compliance(
         "workflow": workflow,
         "decision": decision,
         "checks": checks,
+        "details": details,
+        "as_of": as_of.isoformat(),
         "found": True,
         "reason": (
             "Eligibility checks do not constitute manager or HR approval."
@@ -275,7 +367,7 @@ def check_policy_compliance(
 @mcp.tool()
 def create_mock_hr_ticket(
     employee_id: str,
-    category: Literal["remote_work", "pto"],
+    category: Literal["remote_work", "pto", "benefits"],
     summary: str,
     confirmed: bool = False,
 ) -> dict[str, Any]:

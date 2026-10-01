@@ -1,0 +1,25 @@
+{
+  "target": "local uvicorn",
+  "answer_source": "deterministic",
+  "health_at_start": {
+    "status": "ok",
+    "mcp": "ok",
+    "tool_count": 8
+  },
+  "cold": {
+    "startup_until_healthy_ms": 814.991,
+    "first_chat_ms": 399.736
+  },
+  "warm": {
+    "health": {
+      "samples": 2,
+      "p50_ms": 1.59,
+      "p95_ms": 1.738
+    },
+    "chat": {
+      "samples": 60,
+      "p50_ms": 15.673,
+      "p95_ms": 51.666
+    }
+  }
+}

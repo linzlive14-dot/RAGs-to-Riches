@@ -1,15 +1,21 @@
-"""Gold-task evaluation, latency reporting, and retrieval ablation."""
+"""Gold-task evaluation, latency reporting, and ablations."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-import statistics
+import os
+import socket
+import subprocess
+import sys
 import tempfile
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Literal
+
+import httpx
 
 from app.agent import HRAgent, WorkflowResult
 from app.agent import ChatRequest as AgentChatRequest
@@ -21,14 +27,34 @@ from app.llm import (
     OpenRouterSynthesizer,
 )
 from hr_mcp.client import HRMCPClient
-from rag.answering import answer_query
-from rag.index import PolicyIndex
+from rag.index import PolicyIndex, RetrievalMode
 from rag.ingestion import chunk_documents, load_documents
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TASKS = Path(__file__).with_name("gold_tasks.json")
-DEFAULT_REPORT = Path(__file__).with_name("report.json")
-DEFAULT_ABLATION = Path(__file__).with_name("ablation.json")
+RESULTS_DIR = Path(__file__).with_name("results")
+DEFAULT_REPORT = RESULTS_DIR / "llm-report.json"
+DEFAULT_ABLATION = RESULTS_DIR / "ablation.json"
+DEFAULT_HTTP_REPORT = RESULTS_DIR / "http-latency.json"
+PASSING_ANSWER_MATCH = 0.5
+METRICS = (
+    "groundedness",
+    "citations",
+    "tool_selection",
+    "workflow",
+    "clarification",
+    "safety",
+)
+ABLATIONS: tuple[dict[str, Any], ...] = (
+    {"name": "hybrid retrieval (default)", "retrieval_mode": "hybrid"},
+    {"name": "BM25 only", "retrieval_mode": "bm25"},
+    {"name": "vector only", "retrieval_mode": "vector"},
+    {"name": "hybrid, 100-word chunks", "chunk_size": 100, "overlap": 20},
+    {"name": "hybrid, 260-word chunks", "chunk_size": 260, "overlap": 40},
+    {"name": "without get_policy_section", "disabled_tools": ["get_policy_section"]},
+    {"name": "without check_policy_compliance", "disabled_tools": ["check_policy_compliance"]},
+    {"name": "without search_policy_documents", "disabled_tools": ["search_policy_documents"]},
+)
 
 
 def load_tasks(path: Path = DEFAULT_TASKS) -> list[dict[str, Any]]:
@@ -72,7 +98,7 @@ def _build_index(path: Path, *, chunk_size: int = 180, overlap: int = 30) -> Pol
         configuration={
             "chunk_size": chunk_size,
             "overlap": overlap,
-            "retrieval": "sqlite-fts5-bm25",
+            "retrieval": "hybrid-bm25-faiss-rrf",
         },
     )
     return index
@@ -97,9 +123,28 @@ def _citations_valid(result: WorkflowResult) -> bool:
     return all(f"[{citation.citation_id}]" in result.answer for citation in result.citations)
 
 
+def _normalized(text: str) -> str:
+    return " ".join(text.replace("\u2019", "'").casefold().split())
+
+
+def answer_match(task: dict[str, Any], answer: str) -> float | None:
+    """Fraction of the task's key facts present in the answer (partial credit).
+
+    Each key fact is a list of acceptable phrasings; any one of them counts.
+    """
+
+    facts = task.get("key_facts") or []
+    if not facts:
+        return None
+    text = _normalized(answer)
+    found = sum(any(_normalized(option) in text for option in fact) for fact in facts)
+    return round(found / len(facts), 4)
+
+
 def _structural_scores(task: dict[str, Any], result: WorkflowResult) -> dict[str, bool]:
     expected = task["expected"]
     tools = _tool_names(result)
+    cited = {citation.source for citation in result.citations}
     scores: dict[str, bool] = {}
     if task["kind"] == "workflow":
         status_match = result.status == expected["status"]
@@ -110,14 +155,16 @@ def _structural_scores(task: dict[str, Any], result: WorkflowResult) -> dict[str
         )
         scores["safety"] = not result.mock_action or not result.mock_action.get("created", False)
         if "search_policy_documents" in expected["tools"]:
-            scores["groundedness"] = bool(result.citations)
+            scores["groundedness"] = bool(result.citations) and set(
+                expected.get("sources_all", [])
+            ) <= cited
             scores["citations"] = _citations_valid(result)
     elif task["kind"] == "retrieval":
-        actual_sources = {citation.source for citation in result.citations}
-        expected_sources = set(expected["sources_any"])
         if expected["grounded"]:
             scores["groundedness"] = (
-                result.status == "completed" and bool(actual_sources & expected_sources)
+                result.status == "completed"
+                and bool(cited & set(expected["sources_any"]))
+                and set(expected.get("sources_all", [])) <= cited
             )
             scores["citations"] = _citations_valid(result)
         else:
@@ -170,17 +217,37 @@ def _llm_clients() -> tuple[OpenRouterSynthesizer, OpenRouterIntentExtractor, Op
     )
 
 
+def _category_summary(task_results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for result in task_results:
+        grouped[result["category"]].append(result)
+    summary: dict[str, dict[str, Any]] = {}
+    for category, results in sorted(grouped.items()):
+        matches = [r["answer_match"] for r in results if r["answer_match"] is not None]
+        summary[category] = {
+            "tasks": len(results),
+            "passed": sum(r["passed"] for r in results),
+            "answer_match": round(sum(matches) / len(matches), 4) if matches else None,
+        }
+    return summary
+
+
 async def run_evaluation(
     *,
     tasks_path: Path = DEFAULT_TASKS,
     output_path: Path | None = None,
     top_k: int = 5,
     mode: Literal["offline", "llm"] = "offline",
+    retrieval_mode: RetrievalMode | None = None,
+    chunk_size: int = 180,
+    overlap: int = 30,
+    disabled_tools: list[str] | None = None,
+    index_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Execute the gold set and return a machine-readable score report.
+    """Execute the gold set through the MCP-backed agent and score it.
 
-    ``offline`` checks tool behavior and citation structure without a model.
-    ``llm`` scores the configured model's answers with an LLM judge.
+    ``offline`` checks tool behavior, citations, and key facts without a model.
+    ``llm`` scores the configured model's answers, adding an LLM judge.
     ``top_k`` is retained for callers; chat retrieval uses the agent's top_k.
     """
 
@@ -194,31 +261,28 @@ async def run_evaluation(
     tasks = load_tasks(tasks_path)
     task_results: list[dict[str, Any]] = []
     warm_latencies: list[float] = []
-    metric_values: dict[str, list[bool]] = {
-        name: []
-        for name in (
-            "groundedness",
-            "citations",
-            "tool_selection",
-            "workflow",
-            "clarification",
-            "safety",
-        )
-    }
+    metric_values: dict[str, list[bool]] = {name: [] for name in METRICS}
+    matches: list[float] = []
 
     with tempfile.TemporaryDirectory(prefix="hr-evaluation-") as directory:
-        build_started = time.perf_counter()
-        index_path = Path(directory) / "policy.sqlite3"
-        _build_index(index_path)
-        index_build_ms = (time.perf_counter() - build_started) * 1_000
+        index_build_ms = 0.0
+        if index_path is None:
+            build_started = time.perf_counter()
+            index_path = Path(directory) / "policy.sqlite3"
+            _build_index(index_path, chunk_size=chunk_size, overlap=overlap)
+            index_build_ms = (time.perf_counter() - build_started) * 1_000
 
+        server_env = {"HR_POLICY_INDEX": str(index_path)}
+        if retrieval_mode is not None:
+            server_env["HR_RETRIEVAL_MODE"] = retrieval_mode
         startup_started = time.perf_counter()
-        async with HRMCPClient(env={"HR_POLICY_INDEX": str(index_path)}) as client:
+        async with HRMCPClient(env=server_env) as client:
             mcp_startup_ms = (time.perf_counter() - startup_started) * 1_000
             agent = HRAgent(
                 client,
                 synthesizer=synthesizer,
                 intent_extractor=intent_extractor,
+                disabled_tools=set(disabled_tools or ()),
             )
             for task in tasks:
                 started = time.perf_counter()
@@ -235,7 +299,8 @@ async def run_evaluation(
                         answer=result.answer,
                         evidence=_judge_evidence(result),
                         rubric={
-                            "facts": task.get("facts", []),
+                            "gold_answer": task.get("gold_answer"),
+                            "key_facts": task.get("key_facts", []),
                             "expected_status": task["expected"].get("status"),
                             "sources_any": task["expected"].get("sources_any", []),
                         },
@@ -244,14 +309,20 @@ async def run_evaluation(
                     scores["citations"] = scores["citations"] and judged["citations_accurate"]
                 elapsed_ms = (time.perf_counter() - started) * 1_000
                 warm_latencies.append(elapsed_ms)
+                match = answer_match(task, result.answer)
+                if match is not None:
+                    matches.append(match)
                 for metric, passed in scores.items():
                     metric_values[metric].append(passed)
                 task_results.append(
                     {
                         "id": task["id"],
                         "kind": task["kind"],
-                        "passed": all(scores.values()),
+                        "category": task.get("category", task["kind"]),
+                        "passed": all(scores.values())
+                        and (match is None or match >= PASSING_ANSWER_MATCH),
                         "scores": scores,
+                        "answer_match": match,
                         "answer_source": source,
                         "actual": {
                             "status": result.status,
@@ -263,17 +334,29 @@ async def run_evaluation(
                     }
                 )
 
-    metrics = {
+    metrics: dict[str, float | None] = {
         name: round(sum(values) / len(values), 4) if values else None
         for name, values in metric_values.items()
     }
+    metrics["answer_match"] = round(sum(matches) / len(matches), 4) if matches else None
+    metrics["answer_full_match"] = (
+        round(sum(match == 1.0 for match in matches) / len(matches), 4) if matches else None
+    )
+    cold_samples = [mcp_startup_ms] + ([index_build_ms] if index_build_ms else [])
     report: dict[str, Any] = {
         "task_count": len(tasks),
         "passed": sum(result["passed"] for result in task_results),
         "answer_source": "llm" if mode == "llm" else "deterministic",
+        "configuration": {
+            "retrieval_mode": retrieval_mode or os.environ.get("HR_RETRIEVAL_MODE", "hybrid"),
+            "chunk_size": chunk_size,
+            "overlap": overlap,
+            "disabled_tools": sorted(disabled_tools or []),
+        },
         "metrics": metrics,
+        "categories": _category_summary(task_results),
         "latency": {
-            "cold": _latency_summary([index_build_ms, mcp_startup_ms]),
+            "cold": _latency_summary(cold_samples),
             "cold_components_ms": {
                 "index_build": round(index_build_ms, 3),
                 "mcp_startup": round(mcp_startup_ms, 3),
@@ -292,56 +375,157 @@ def run_ablation(
     *,
     tasks_path: Path = DEFAULT_TASKS,
     output_path: Path | None = None,
+    configurations: tuple[dict[str, Any], ...] = ABLATIONS,
 ) -> dict[str, Any]:
-    """Compare chunk-size and retrieval-k settings on retrieval gold tasks."""
+    """Run the full offline gold set once per retriever, chunking, or tool setting."""
 
-    retrieval_tasks = [
-        task
-        for task in load_tasks(tasks_path)
-        if task["kind"] == "retrieval" and task["expected"]["grounded"]
-    ]
-    configurations: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="hr-ablation-") as directory:
-        for chunk_size, overlap in ((100, 20), (180, 30), (260, 40)):
-            index = _build_index(
-                Path(directory) / f"policy-{chunk_size}.sqlite3",
-                chunk_size=chunk_size,
-                overlap=overlap,
-            )
-            for top_k in (3, 5, 8):
-                hits = 0
-                grounded = 0
-                latencies: list[float] = []
-                for task in retrieval_tasks:
-                    started = time.perf_counter()
-                    answer = answer_query(index, task["query"], top_k=top_k)
-                    latencies.append((time.perf_counter() - started) * 1_000)
-                    sources = {citation.source for citation in answer.citations}
-                    expected_sources = set(task["expected"]["sources_any"])
-                    hits += bool(sources & expected_sources)
-                    grounded += answer.grounded
-                configurations.append(
-                    {
-                        "chunk_size": chunk_size,
-                        "overlap": overlap,
-                        "top_k": top_k,
-                        "source_hit_rate": round(hits / len(retrieval_tasks), 4),
-                        "grounded_rate": round(grounded / len(retrieval_tasks), 4),
-                        "mean_latency_ms": round(statistics.fmean(latencies), 3),
-                    }
+        indexes: dict[tuple[int, int], Path] = {}
+        for configuration in configurations:
+            chunking = (configuration.get("chunk_size", 180), configuration.get("overlap", 30))
+            if chunking not in indexes:
+                indexes[chunking] = Path(directory) / f"policy-{chunking[0]}.sqlite3"
+                _build_index(indexes[chunking], chunk_size=chunking[0], overlap=chunking[1])
+            report = asyncio.run(
+                run_evaluation(
+                    tasks_path=tasks_path,
+                    retrieval_mode=configuration.get("retrieval_mode", "hybrid"),
+                    chunk_size=chunking[0],
+                    overlap=chunking[1],
+                    disabled_tools=configuration.get("disabled_tools"),
+                    index_path=indexes[chunking],
                 )
+            )
+            rows.append(
+                {
+                    "name": configuration["name"],
+                    **report["configuration"],
+                    "passed": report["passed"],
+                    "task_count": report["task_count"],
+                    "metrics": report["metrics"],
+                    "categories": report["categories"],
+                    "warm_p50_ms": report["latency"]["warm"]["p50_ms"],
+                    "failed_tasks": [task["id"] for task in report["tasks"] if not task["passed"]],
+                }
+            )
+    retrieval_rows = [row for row in rows if not row["disabled_tools"]]
     best = max(
-        configurations,
-        key=lambda item: (
-            item["source_hit_rate"],
-            item["grounded_rate"],
-            -item["mean_latency_ms"],
+        retrieval_rows,
+        key=lambda row: (
+            row["passed"],
+            row["metrics"]["answer_match"] or 0.0,
+            row["metrics"]["groundedness"] or 0.0,
         ),
     )
     report = {
-        "task_count": len(retrieval_tasks),
-        "configurations": configurations,
-        "recommended": best,
+        "answer_source": "deterministic",
+        "configurations": rows,
+        "recommended": best["name"],
+    }
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def measure_http_latency(
+    *,
+    tasks_path: Path = DEFAULT_TASKS,
+    base_url: str | None = None,
+    rounds: int = 2,
+    use_llm: bool = False,
+    output_path: Path | None = None,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """Time `/health` and `/chat` over real HTTP.
+
+    Without `base_url`, starts a local uvicorn server (with its MCP session)
+    and includes that start-up in the cold measurement.
+    """
+
+    messages = [task["message"] for task in load_tasks(tasks_path)]
+    process: subprocess.Popen[bytes] | None = None
+    startup_ms: float | None = None
+    with tempfile.TemporaryDirectory(prefix="hr-http-") as directory:
+        if base_url is None:
+            index_path = Path(directory) / "policy.sqlite3"
+            _build_index(index_path)
+            port = _free_port()
+            base_url = f"http://127.0.0.1:{port}"
+            environment = os.environ.copy()
+            environment["HR_POLICY_INDEX"] = str(index_path)
+            if not use_llm:
+                environment["OPENROUTER_API_KEY"] = ""
+            started = time.perf_counter()
+            process = subprocess.Popen(
+                [sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(port)],
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        try:
+            with httpx.Client(base_url=base_url, timeout=timeout) as http:
+                deadline = time.monotonic() + timeout
+                health: dict[str, Any] = {}
+                while time.monotonic() < deadline:
+                    try:
+                        response = http.get("/health")
+                        if response.status_code == 200:
+                            health = response.json()
+                            break
+                    except httpx.TransportError:
+                        pass
+                    time.sleep(0.25)
+                else:
+                    raise TimeoutError(f"{base_url}/health did not respond within {timeout:g}s")
+                if process is not None:
+                    startup_ms = (time.perf_counter() - started) * 1_000
+
+                first_started = time.perf_counter()
+                http.post("/chat", json={"message": messages[0]}).raise_for_status()
+                first_chat_ms = (time.perf_counter() - first_started) * 1_000
+
+                health_ms: list[float] = []
+                chat_ms: list[float] = []
+                for _ in range(rounds):
+                    started_health = time.perf_counter()
+                    http.get("/health").raise_for_status()
+                    health_ms.append((time.perf_counter() - started_health) * 1_000)
+                    for message in messages:
+                        started_chat = time.perf_counter()
+                        http.post("/chat", json={"message": message}).raise_for_status()
+                        chat_ms.append((time.perf_counter() - started_chat) * 1_000)
+        finally:
+            if process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+
+    report = {
+        "target": "local uvicorn" if startup_ms is not None else base_url,
+        "answer_source": "llm" if health.get("llm", {}).get("configured") else "deterministic",
+        "health_at_start": {
+            "status": health.get("status"),
+            "mcp": health.get("mcp", {}).get("status"),
+            "tool_count": health.get("mcp", {}).get("tool_count"),
+        },
+        "cold": {
+            "startup_until_healthy_ms": round(startup_ms, 3) if startup_ms is not None else None,
+            "first_chat_ms": round(first_chat_ms, 3),
+        },
+        "warm": {
+            "health": _latency_summary(health_ms),
+            "chat": _latency_summary(chat_ms),
+        },
     }
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -352,29 +536,65 @@ def run_ablation(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks", type=Path, default=DEFAULT_TASKS)
-    parser.add_argument("--output", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument(
+        "--mode",
+        choices=("llm", "offline"),
+        default="llm",
+        help="llm scores model answers with a judge; offline needs no API key.",
+    )
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--ablation-output", type=Path, default=DEFAULT_ABLATION)
+    parser.add_argument("--skip-ablation", action="store_true")
+    parser.add_argument(
+        "--http",
+        nargs="?",
+        const="local",
+        default=None,
+        help="Also time /health and /chat over HTTP: 'local' or a base URL.",
+    )
+    parser.add_argument("--http-output", type=Path, default=DEFAULT_HTTP_REPORT)
+    parser.add_argument(
+        "--min-pass-rate",
+        type=float,
+        default=None,
+        help="Exit non-zero when fewer than this fraction of tasks pass.",
+    )
     args = parser.parse_args()
+    output = args.output or RESULTS_DIR / f"{args.mode}-report.json"
     try:
         report = asyncio.run(
-            run_evaluation(tasks_path=args.tasks, output_path=args.output, mode="llm")
+            run_evaluation(tasks_path=args.tasks, output_path=output, mode=args.mode)
         )
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
-    ablation = run_ablation(tasks_path=args.tasks, output_path=args.ablation_output)
-    print(
-        json.dumps(
-            {
-                "evaluation": {
-                    "passed": report["passed"],
-                    "task_count": report["task_count"],
-                    "metrics": report["metrics"],
-                },
-                "recommended_ablation": ablation["recommended"],
-            },
-            indent=2,
+    summary: dict[str, Any] = {
+        "evaluation": {
+            "passed": report["passed"],
+            "task_count": report["task_count"],
+            "metrics": report["metrics"],
+            "report": str(output),
+        }
+    }
+    if not args.skip_ablation:
+        ablation = run_ablation(tasks_path=args.tasks, output_path=args.ablation_output)
+        summary["ablation"] = {
+            row["name"]: f"{row['passed']}/{row['task_count']}" for row in ablation["configurations"]
+        }
+        summary["recommended_ablation"] = ablation["recommended"]
+    if args.http:
+        http_report = measure_http_latency(
+            tasks_path=args.tasks,
+            base_url=None if args.http == "local" else args.http,
+            use_llm=args.mode == "llm",
+            output_path=args.http_output,
         )
-    )
+        summary["http"] = {"cold": http_report["cold"], "warm_chat": http_report["warm"]["chat"]}
+    print(json.dumps(summary, indent=2))
+    if args.min_pass_rate is not None and report["passed"] < args.min_pass_rate * report["task_count"]:
+        raise SystemExit(
+            f"Evaluation passed {report['passed']}/{report['task_count']}, "
+            f"below the required {args.min_pass_rate:.0%}"
+        )
 
 
 if __name__ == "__main__":

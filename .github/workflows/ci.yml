@@ -5,18 +5,23 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 1"
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
   test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      HR_EMBEDDING_CACHE: data/models
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,22 +34,107 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.lock
           python -m pip install --no-deps -e .
+      - name: Cache the embedding model
+        uses: actions/cache@v4
+        with:
+          path: data/models
+          key: embedding-BAAI-bge-small-en-v1.5-${{ hashFiles('requirements.lock') }}
       - name: Build the policy index
         run: python -m rag build
       - name: Run automated tests
         run: pytest
-      - name: Run gold evaluation and ablation
+      - name: Offline gold evaluation, ablation, and HTTP latency (deploy gate)
+        run: >-
+          python -m evaluation.runner --mode offline --http local
+          --min-pass-rate 0.9
+      - name: Start-up smoke test of the deployed process layout
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: python -m evaluation.runner
+          API_PORT: "8000"
+          PORT: "10000"
+          OPENROUTER_API_KEY: ""
+        run: |
+          python -m app.deploy > deploy.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:10000/_stcore/health > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --show-error --silent http://127.0.0.1:10000/_stcore/health
+          curl --fail --show-error --silent http://127.0.0.1:8000/health | tee health.json
+          python - <<'EOF'
+          import json
+          health = json.load(open("health.json"))
+          assert health["status"] == "ok", health
+          assert health["mcp"]["status"] == "ok" and health["mcp"]["tool_count"] >= 8, health
+          assert health["index"]["status"] == "ok", health
+          EOF
+          curl --fail --show-error --silent -X POST http://127.0.0.1:8000/chat \
+            -H 'content-type: application/json' \
+            -d '{"message": "My laptop was stolen. Who do I tell?"}' | tee chat.json
+          python -c "import json; r = json.load(open('chat.json')); assert r['status'] == 'completed' and r['citations'], r"
+          kill %1
+      - name: Show start-up log on failure
+        if: failure()
+        run: cat deploy.log || true
       - name: Upload evaluation evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: evaluation-${{ github.sha }}
-          path: |
-            evaluation/report.json
-            evaluation/ablation.json
+          path: evaluation/results/
           retention-days: 30
+
+  graded-evaluation:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      HR_EMBEDDING_CACHE: data/models
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - name: Check for an LLM key
+        id: key
+        run: |
+          if test -n "$OPENROUTER_API_KEY"; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Graded evaluation skipped: OPENROUTER_API_KEY is not configured"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.key.outputs.enabled == 'true'
+      - uses: actions/setup-python@v5
+        if: steps.key.outputs.enabled == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install locked dependencies
+        if: steps.key.outputs.enabled == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+          python -m pip install --no-deps -e .
+      - name: Cache the embedding model
+        if: steps.key.outputs.enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          path: data/models
+          key: embedding-BAAI-bge-small-en-v1.5-${{ hashFiles('requirements.lock') }}
+      - name: Build the policy index
+        if: steps.key.outputs.enabled == 'true'
+        run: python -m rag build
+      - name: Run the LLM-graded gold evaluation
+        if: steps.key.outputs.enabled == 'true'
+        run: python -m evaluation.runner --mode llm --skip-ablation
+      - name: Upload graded evaluation
+        if: always() && steps.key.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: graded-evaluation-${{ github.sha }}
+          path: evaluation/results/llm-report.json
+          retention-days: 90
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
