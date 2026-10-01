@@ -53,3 +53,11 @@ Records follow the retention schedule and legal holds. Deleting a local copy doe
 Violations are reviewed based on intent, harm, role, training, and prior conduct. Immediate access suspension may be used to contain risk and is not a disciplinary finding. Retaliation against a person who reports a concern is prohibited.
 
 Security exceptions must state the business reason, data involved, compensating controls, owner, approvers, and expiration date. Information Security and the data owner must approve before the exception is used. Legal or Privacy review is required when regulated personal data is affected.
+
+## Passwords, phishing, and everyday use
+
+Employees use the company password manager and turn on multifactor authentication for company accounts. Passwords are not shared, not reused from personal sites, and not stored in chat or in a document. A coworker who asks for a password, including a manager, is refused, and the request is reported to the security hotline. Account sharing is not allowed as a convenience during vacation. Access is delegated through the product's own sharing controls.
+
+A message that creates urgency, asks for a code, or asks the employee to buy gift cards or change payroll details is treated as phishing even if it appears to come from an executive. The employee uses the Report Phish button and does not click links or open unexpected attachments. A wrong payroll-change request is also reported to Payroll. Forwarding company files to a personal email account, a personal cloud drive, or a public artificial-intelligence tool is not allowed. Drafting ordinary, nonconfidential text in an approved tool is allowed. Customer data, employee data, source code, and unreleased financials are confidential and stay in company systems.
+
+A lost or stolen badge, laptop, or phone is reported immediately, the same way as any other security incident, so access can be revoked. The employee does not wait until the next business day.

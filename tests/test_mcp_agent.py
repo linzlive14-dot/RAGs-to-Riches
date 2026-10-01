@@ -21,6 +21,7 @@ def test_mcp_tools_are_discoverable_and_callable() -> None:
                 "lookup_benefits_status",
                 "check_policy_compliance",
                 "create_mock_hr_ticket",
+                "list_work_locations",
             }
             profile = await client.call_tool(
                 "lookup_employee_profile", {"employee_id": "SYN-1001"}
@@ -135,6 +136,41 @@ def test_chat_follow_up_supplies_hours_and_confirms_ticket(tmp_path: Path) -> No
             assert confirmed.status == "completed"
             assert confirmed.mock_action is not None
             assert confirmed.mock_action["created"] is True
+
+    asyncio.run(scenario())
+
+
+def test_unknown_place_is_reported_with_supported_locations() -> None:
+    async def scenario() -> None:
+        async with HRMCPClient() as client:
+            agent = HRAgent(client)
+            result = await agent.chat(
+                ChatRequest(message="Can SYN-1001 work remotely from Oregon?")
+            )
+            assert result.status == "escalated"
+            assert "Oregon" in result.answer
+            assert "California" in result.answer
+            assert "New York" in result.answer
+            assert "Texas" in result.answer
+            assert "Please provide the requested work location" not in result.answer
+            assert "list_work_locations" in [step.tool for step in result.trace]
+
+            listed = await agent.chat(
+                ChatRequest(message="Where can I work remotely?")
+            )
+            assert listed.status == "completed"
+            assert "California" in listed.answer
+            assert "list_work_locations" in [step.tool for step in listed.trace]
+
+            clarification = await agent.chat(
+                ChatRequest(message="Can SYN-1001 work remotely?")
+            )
+            follow_up = await agent.chat(
+                ChatRequest(message="Seattle", context=clarification.context)
+            )
+            assert follow_up.status == "escalated"
+            assert "Seattle" in follow_up.answer
+            assert "California" in follow_up.answer
 
     asyncio.run(scenario())
 

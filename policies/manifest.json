@@ -1,7 +1,7 @@
 {
   "corpus_name": "RAGs to Riches Synthetic HR Policy Corpus",
   "synthetic": true,
-  "version": "2026.09.1",
+  "version": "2026.09.2",
   "created_for": "software demonstration and retrieval evaluation",
   "provenance": {
     "author": "RAGs to Riches project",
@@ -12,12 +12,16 @@
   "documents": [
     "benefits.md",
     "business-travel-and-expenses.txt",
+    "holidays-and-civic-leave.md",
     "information-security.md",
     "leave-of-absence.md",
     "paid-time-off.md",
+    "payroll-and-working-time.md",
+    "performance-learning-and-separation.md",
     "remote-work.md",
     "workplace-accommodations.txt",
-    "workplace-conduct.md"
+    "workplace-conduct.md",
+    "workplace-logistics.txt"
   ],
   "notice": "These documents do not provide legal, employment, medical, tax, or benefits advice."
 }

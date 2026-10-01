@@ -36,9 +36,97 @@ class ParsedIntent(BaseModel):
     intent: IntentLabel
     employee_id: str | None = None
     requested_location_id: str | None = None
+    unrecognized_location: str | None = None
     requested_hours: float | None = Field(default=None, gt=0)
     create_ticket: bool = False
     confirmed: bool = False
+
+
+_PLACE_RE = re.compile(
+    r"\b(?:from|in|at)\s+([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,3})"
+)
+_PLACE_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "for",
+    "please",
+    "remote",
+    "remotely",
+    "the",
+    "to",
+    "with",
+    "work",
+}
+_GENERIC_PLACES = {
+    "abroad",
+    "another country",
+    "another location",
+    "another state",
+    "overseas",
+    "somewhere",
+    "somewhere else",
+}
+_SKIP_PLACES = _GENERIC_PLACES | {"here", "home", "office", "there", "work"}
+
+
+def _clean_place(phrase: str) -> str | None:
+    without_article = re.sub(r"^(?:the|a|an)\s+", "", phrase.strip(), flags=re.IGNORECASE)
+    kept: list[str] = []
+    for word in without_article.split():
+        token = word.strip(".,")
+        if token.casefold() in _PLACE_STOP_WORDS:
+            break
+        if token:
+            kept.append(token)
+    if not kept:
+        return None
+    text = " ".join(kept)
+    if text.casefold() in _SKIP_PLACES or _location_id(text):
+        return None
+    return text
+
+
+_LOCATION_LIST_RE = re.compile(
+    r"\b(?:which|what|list)\b(?:\s+\w+){0,6}\s+(?:locations|states|cities|places|countries)\b"
+    r"|\bwhere can i work\b"
+    r"|\blist of (?:locations|states|places|cities|countries)\b"
+    r"|\b(?:locations|states|places|cities|countries) (?:can|could) i\b",
+    re.IGNORECASE,
+)
+
+
+def asks_for_location_list(message: str) -> bool:
+    """True when the user wants the remote-work location register, not one place."""
+
+    if _location_id(message) or unrecognized_place(message):
+        return False
+    return _LOCATION_LIST_RE.search(message) is not None
+
+
+def unrecognized_place(message: str) -> str | None:
+    """Return a named place that is not in the location register."""
+
+    match = _PLACE_RE.search(message)
+    if match:
+        return _clean_place(match.group(1))
+    return None
+
+
+def bare_place(message: str) -> str | None:
+    """Return a short follow-up that names a place and nothing else."""
+
+    cleaned = message.strip(" ?!.")
+    if not re.fullmatch(
+        r"[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,3}",
+        cleaned,
+    ):
+        return None
+    if QUESTION_RE.search(cleaned) or REMOTE_RE.search(cleaned) or PTO_RE.search(cleaned):
+        return None
+    if EMPLOYEE_RE.search(cleaned) or HOURS_RE.search(cleaned):
+        return None
+    return _clean_place(cleaned)
 
 
 def _locations() -> list[dict[str, Any]]:
@@ -107,6 +195,14 @@ def deterministic_intent(message: str, context: dict[str, Any] | None = None) ->
     employee_match = EMPLOYEE_RE.search(message)
     employee_id = employee_match.group(0).upper() if employee_match else None
     location_id = _location_id(message)
+    unrecognized = None if location_id else unrecognized_place(message)
+    if (
+        unrecognized is None
+        and location_id is None
+        and context.get("workflow") == "remote_work"
+        and not context.get("requested_location_id")
+    ):
+        unrecognized = bare_place(message)
     hours_match = HOURS_RE.search(message)
     hours = float(hours_match.group(1)) if hours_match else None
     create_ticket = bool(TICKET_RE.search(message))
@@ -123,9 +219,12 @@ def deterministic_intent(message: str, context: dict[str, Any] | None = None) ->
     intent: IntentLabel
     if employee_id and remote:
         intent = "remote_work"
+    elif unrecognized and (remote or context.get("workflow") == "remote_work"):
+        intent = "remote_work"
+        employee_id = employee_id or _valid_employee_id(context.get("employee_id"))
     elif employee_id and pto:
         intent = "pto"
-    elif remote and location_id and not pto:
+    elif remote and (location_id or unrecognized) and not pto:
         intent = "remote_work"
     elif pto and hours is not None:
         intent = "pto"
@@ -143,6 +242,7 @@ def deterministic_intent(message: str, context: dict[str, Any] | None = None) ->
         intent=intent,
         employee_id=employee_id,
         requested_location_id=location_id,
+        unrecognized_location=unrecognized,
         requested_hours=hours,
         create_ticket=create_ticket,
     )
@@ -170,6 +270,14 @@ def resolve_intent(
     location_id = _location_id(message) or _valid_location_id(model.requested_location_id)
     if location_id is None:
         location_id = detected.requested_location_id
+    unrecognized = None if location_id else detected.unrecognized_location
+    if (
+        unrecognized is None
+        and location_id is None
+        and model.requested_location_id
+        and not _valid_location_id(model.requested_location_id)
+    ):
+        unrecognized = model.requested_location_id.strip()
     hours_match = HOURS_RE.search(message)
     if hours_match:
         hours = float(hours_match.group(1))
@@ -181,6 +289,7 @@ def resolve_intent(
         intent=intent,
         employee_id=employee_id,
         requested_location_id=location_id,
+        unrecognized_location=unrecognized,
         requested_hours=hours,
         create_ticket=detected.create_ticket or model.create_ticket,
     )

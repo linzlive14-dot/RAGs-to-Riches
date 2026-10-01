@@ -95,7 +95,7 @@ path without a key.
 
 ## Retrieval and MCP
 
-The eight-policy Markdown/TXT corpus and all JSON records are explicitly
+The twelve-policy Markdown/TXT corpus and all JSON records are explicitly
 synthetic. `policies/manifest.json` records provenance and AI assistance.
 Heading-aware chunks use fixed overlap, stable SHA-256 identifiers, SQLite FTS5
 BM25 ranking, and deterministic tie-breaking.
@@ -127,7 +127,7 @@ waits for a client. The chatbot already starts this server when you use the UI:
 python -m hr_mcp.server
 ```
 
-The seven MCP tools cover policy search/section retrieval, employee, PTO, and
+The eight MCP tools cover policy search/section retrieval, the location register, employee, PTO, and
 benefits lookups, compliance checks, and confirmation-gated ticket creation.
 The agent reaches all tool implementations through the MCP client boundary.
 

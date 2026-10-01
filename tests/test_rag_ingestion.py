@@ -12,7 +12,7 @@ def test_loads_both_supported_policy_formats_with_stable_ids() -> None:
     first = load_documents(POLICY_DIR)
     second = load_documents(POLICY_DIR)
 
-    assert len(first) == 8
+    assert len(first) == 12
     assert {Path(document.source).suffix for document in first} == {".md", ".txt"}
     assert [(document.document_id, document.source) for document in first] == [
         (document.document_id, document.source) for document in second

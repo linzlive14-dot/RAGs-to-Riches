@@ -59,3 +59,17 @@ The Head of People must approve extensions. Personal leave cannot be used to avo
 ## Escalation and records
 
 HR maintains leave records separately from ordinary personnel files. Managers receive only dates, schedule limits, work restrictions, and coordination information they need. Any complaint of interference, retaliation, confidentiality failure, or inconsistent treatment is escalated to the Head of People and Legal.
+
+## Military leave
+
+An employee who performs uniformed-service duty may take military leave. The employee gives HR a copy of the orders when it is reasonable to do so. Annual training and short orders are job-protected. For the first six months of a military leave in a calendar year, the company pays the difference between military base pay and the employee's base pay when the employee submits the military pay statement. After that, the leave is unpaid, and benefits follow the pay-and-benefits section of this policy. Reemployment follows the timeline in the orders and the rules that apply to the work location. A manager must not require the employee to use paid time off for military duty.
+
+## Sabbatical
+
+An employee with at least five completed years of continuous service may request an unpaid sabbatical of four to eight weeks. The request is made at least 90 calendar days ahead and describes the dates and a coverage plan. The manager and the Head of People approve it based on staffing and on whether the employee is in good standing. A sabbatical is not job-protected. HR will try to return the employee to the same team, but a comparable role may be offered instead. Sabbatical time does not accrue paid time off. It cannot be combined with outside work for a competitor. Benefits for an unpaid sabbatical follow the same rules as other unpaid personal leave.
+
+## Workers' compensation and safe leave
+
+An injury or illness that the employee believes is related to work is reported in the safety portal and to HR the same day, or as soon as the employee can report it. HR coordinates the workers' compensation claim with the insurer. Time away that the insurer accepts is not deducted from paid time off. The manager is told the work restrictions and the expected dates, not the medical diagnosis. An employee may see their own clinician and may also be asked to attend an insurer examination when the location allows it. Retaliation for filing a claim is prohibited.
+
+An employee who needs time away because of domestic violence, sexual assault, or stalking can contact HR directly and does not have to tell the manager the details. HR will arrange a reasonable amount of time away, a safety plan for the workplace, and any available paid time, and will keep the reason confidential. A manager who is told only that HR has approved the absence should record it as approved and should not ask the employee to explain. Concerns about a coworker’s safety are sent to HR or the ethics line rather than discussed in a team channel.

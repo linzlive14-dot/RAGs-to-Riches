@@ -53,3 +53,25 @@ Life insurance conversion, health account use, and retirement plan rights have s
 ## Controlling documents
 
 Summary plan descriptions, insurance certificates, and formal plan documents control over this policy when there is a conflict. The company may amend or terminate plans as permitted by law. Benefits questions involving urgent treatment, disputed eligibility, or an approaching appeal deadline should be escalated immediately.
+
+## Retirement plan
+
+Eligible employees may join the company 401(k) plan on the first payday after 90 days of employment. The company matches 100 percent of the first 4 percent of eligible pay that the employee contributes. The match is calculated each pay period. Employee contributions vest immediately. The company match vests after three years of service, all at once. An employee who leaves before that date forfeits the unvested match. Loans and hardship withdrawals follow the plan document and are requested from the retirement recordkeeper, not from a manager.
+
+The employee changes the contribution rate in the retirement portal. A change entered at least five business days before payday applies to that payday. The company does not recommend a contribution rate or an investment. Employees who want advice should use the recordkeeper's licensed adviser or their own adviser.
+
+## Equity awards
+
+Some offer letters include a discretionary equity award, described as a number of fictional demo units in the RAGs to Riches Demo Company equity plan. An award is not wages, is not guaranteed for future years, and has no value until the conditions in the award agreement are met. The standard vesting example in this demo is 25 percent after one year and the rest in equal monthly portions over the following three years, while the person remains an employee. A termination usually stops unvested units. The award agreement, not this summary, controls vesting, a change in control, and what happens at separation.
+
+Employees can see granted, vested, and unvested units in the equity tile of the HR system. They do not trade or transfer demo units. Questions about taxes on an award go to a tax adviser. People Operations can explain what the screen shows, but cannot predict a future unit price or promise a refresh grant. A refresh grant, when offered, is a new award and is not part of the annual bonus.
+
+## Health accounts, life insurance, and disability
+
+Employees enrolled in the high-deductible medical option may contribute to a health savings account. The company contributes $500 per year for employee-only coverage and $1,000 per year for other coverage levels, deposited quarterly. Employees enrolled in the standard medical option may elect a health care flexible spending account during enrollment, up to the annual limit published in the enrollment guide. Up to $640 of an unused flexible spending balance may carry into the next year. Amounts above that are forfeited. A dependent-care flexible spending account is a separate election for eligible care of a dependent while the employee works.
+
+The company pays for basic life insurance equal to one times annual base pay, and for short-term disability that replaces 60 percent of base pay after a seven-day waiting period, for up to 13 weeks, subject to the certificate. Long-term disability, supplemental life, and accidental death coverage are optional employee-paid elections. Disability claims are filed with the insurer. A manager is told only the approved dates away from work.
+
+## Employee assistance program
+
+Every regular employee and each person living in their household may use the employee assistance program from the hire date. The program includes up to six counseling sessions per issue per year, plus referrals for legal, financial, and childcare questions. Use is confidential. The company receives only aggregate usage counts, not names. Contact information is on the benefits tile in the HR system. Using the program is not reported to the manager and is not a performance issue.

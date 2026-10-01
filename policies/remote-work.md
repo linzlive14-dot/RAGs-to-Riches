@@ -22,6 +22,8 @@ International remote work is prohibited unless Legal, Information Security, Payr
 
 The company currently supports regular remote employment only in locations listed as active in the synthetic location register. Moving to another state or country can change taxes, pay range, benefits, insurance, and labor-law obligations. Employees must submit a location change request at least 30 days before a planned move.
 
+The synthetic location register contains California (US-CA), New York (US-NY), Texas (US-TX), Florida (US-FL), and London (GB-LND). Regular remote employment is supported only in California, New York, and Texas. Florida is in the register but is not supported for regular remote employment. London is international and is not supported for regular remote employment. A city, state, or country that is not one of those five register entries is outside the register. Naming that place is not the same as leaving the location blank; HR cannot approve regular remote work there from this list.
+
 ## Schedule and availability
 
 Employees follow the work schedule recorded for their team. Unless the manager documents another window, hybrid and remote employees must be reachable from 10:00 a.m. through 3:00 p.m. in their assigned team time zone. Meal and rest breaks follow the employee's work location. Non-exempt employees must record all hours worked and receive approval before overtime.
@@ -47,3 +49,15 @@ Arrangements are reviewed at least every six months and whenever the employee ch
 Medical and disability-related requests are handled under the Workplace Accommodations Policy, not decided solely under this policy. Employees should not include diagnoses in a normal remote-work request. HR will direct them to the confidential accommodation process.
 
 Only the Head of People may approve an exception to tenure or review intervals. Legal and Payroll must approve exceptions involving an unsupported location. All exceptions must identify an owner, reason, start date, end date, and review date.
+
+## Home office support
+
+After a remote or hybrid arrangement is approved, the employee may request a one-time home-office setup amount of up to $500. The amount covers a desk, chair, monitor, or lamp bought for work. It does not cover rent, utilities other than the internet stipend, furniture for other household members, or renovations. The employee submits itemized receipts within 60 calendar days of the approval date. A second setup amount is not available unless the employee changes primary work location and HR approves a new arrangement.
+
+The company also pays a $50 monthly internet stipend while the remote or hybrid arrangement is active. The stipend is added to pay and may be taxable. It stops at the end of the month in which the arrangement ends. Employees who need a monitor, keyboard, or headset that stays company property request it through Workplace Experience instead of the setup amount. Company property is returned when the arrangement or the employment ends.
+
+## Meetings and availability
+
+Employees keep core collaboration hours from 10:00 a.m. to 3:00 p.m. in the team's primary time zone, matching the workplace logistics policy. A camera is expected for team meetings unless the employee has an approved accommodation or the meeting host says cameras are optional. Backgrounds should not reveal confidential information. A coworker may use a blurred background.
+
+If the home is too noisy or too crowded for a customer meeting, the employee may use a company coworking day pass on up to four days in a calendar month. The pass is booked in the Workplace Experience portal and must be in an approved work location. Coworking does not expand the location register. Children, pets, and other household members may be at home during the workday. They should not be asked to participate in meetings, and the employee remains responsible for customer confidentiality.

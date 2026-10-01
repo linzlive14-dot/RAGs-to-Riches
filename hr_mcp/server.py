@@ -70,6 +70,23 @@ def _public_employee(employee: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool()
+def list_work_locations() -> dict[str, Any]:
+    """Return the synthetic location register, including remote-work support."""
+
+    locations = [
+        {
+            "location_id": item["location_id"],
+            "region": item["region"],
+            "country": item["country"],
+            "regular_remote_employment_supported": item["regular_remote_employment_supported"],
+            "international": item["international"],
+        }
+        for item in _load_collection("locations.json", "locations")
+    ]
+    return {"found": True, "locations": locations, "synthetic": True}
+
+
+@mcp.tool()
 def search_policy_documents(query: str, top_k: int = 5) -> dict[str, Any]:
     """Search policy chunks and return ranked text with citation metadata."""
 

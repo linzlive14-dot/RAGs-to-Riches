@@ -55,3 +55,15 @@ Employees may not extend employment by placing PTO after their final active day 
 PTO approval is separate from job-protected leave. Employees needing time for their own serious health condition, caregiving, parental bonding, military duties, jury service, bereavement, voting, or safety-related reasons should review the applicable leave policy or contact HR. The company will coordinate balances without requiring an employee to disclose private medical facts to a manager.
 
 Questions involving local law, a possible accommodation, retaliation, or inconsistent treatment must be escalated to HR. This policy is guidance and does not override more protective law.
+
+## Sick time and appointments
+
+A short illness, a medical appointment, or a day spent caring for a sick household member uses paid time off unless the employee's work location maintains a separate sick bank. Where a separate sick bank exists, the HR system shows it, and the employee uses that bank before vacation time. The employee does not tell the manager a diagnosis. It is enough to say that the absence is for illness or an appointment and to give the expected return time.
+
+Appointments that take part of a day are recorded in the same increments as other paid time off. An employee who becomes contagious, including with a fever or a public-health isolation instruction, should stay home and notify the manager. The company would rather the person miss a day than come to an office while contagious. A pattern of unplanned absences can be discussed for staffing, but HR reviews the situation before any attendance warning if the absences may be protected, medical, or related to disability.
+
+## Blackout dates and partial days
+
+A team may name a small number of blackout dates when planned vacation is limited, such as a product launch or a scheduled audit. Blackout dates are posted at least 30 calendar days ahead and do not apply to unplanned illness, bereavement, jury duty, or protected leave. An employee who already has an approved vacation on a newly posted blackout date keeps that approval.
+
+Partial-day vacation is allowed. Non-exempt employees record it in quarter hours. Exempt employees record a half day when they will miss about half of the scheduled day, and they do not record paid time off for a short appointment that they make up within the same workweek. Making up time must not create off-the-clock work for a non-exempt employee.

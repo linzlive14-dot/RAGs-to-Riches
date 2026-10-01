@@ -55,3 +55,17 @@ Disclosure is intended to manage conflicts and does not itself imply misconduct.
 Nothing in this policy is intended to restrict lawful discussion of wages, hours, working conditions, protected concerted activity, whistleblowing, or reporting to a government agency. Employees do not need company permission to exercise those rights.
 
 Questions about whether conduct is covered should be directed to HR. Uncertainty is not a reason to delay a safety concern or possible harassment report.
+
+## Social media, gifts, and outside work
+
+Employees may have personal social-media accounts. They do not speak for the company unless Corporate Communications has assigned that role. A personal post that uses a company title should make clear that the views are personal. Confidential information, internal screenshots, and comments about an active investigation do not belong on social media. Disagreeing with the company about wages or working conditions can be protected; publishing customer secrets is not.
+
+Gifts from vendors, customers, or applicants are limited to items worth $50 or less, such as a modest meal or a promotional item. Cash, gift cards, and anything above $50 are declined or turned over to HR to share with the team or donate. Gifts to government officials are not allowed without Legal approval. Employees do not offer a gift to influence a customer employee who is barred from accepting it.
+
+Outside employment, a board seat, or a consulting project is disclosed to HR before it starts when it could overlap with company time, use company equipment, or compete with the company. HR approves work that does not create that conflict. Work for a direct competitor is not approved. Occasional volunteer work that does not conflict with the schedule does not need approval. Company time and company systems are not used for the outside activity.
+
+## Meetings, recordings, and confidential conversations
+
+Work meetings may be recorded only when the host says so at the start and the recording tool shows that recording is on. A private recording, including a phone recording that other attendees do not know about, is not allowed. Recordings are stored in the team’s company drive and follow the same retention rules as other work files. They are not posted to a personal account.
+
+Salary, performance, medical leave, and investigation conversations are confidential. An employee may discuss their own wages and working conditions with coworkers. They may not forward someone else’s review, a benefits claim, or an investigation note. A question about whether a conversation can be shared goes to HR before the employee posts or forwards it. Chat tools, including the synthetic HR assistant, are not a private diary. Employees should not paste a coworker’s personal information into a prompt.
