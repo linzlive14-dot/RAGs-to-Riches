@@ -1,4 +1,4 @@
-"""Streamlit chat experience for the synthetic HR workflow API."""
+"""Streamlit chat experience for the synthetic HR assistant."""
 
 from __future__ import annotations
 
@@ -9,29 +9,25 @@ import httpx
 import streamlit as st
 
 API_URL = os.environ.get("HR_API_URL", "http://127.0.0.1:8000").rstrip("/")
-PRESETS = {
-    "Remote work — eligible": {
-        "workflow": "remote_work",
-        "employee_id": "SYN-1001",
-        "requested_location_id": "US-NY",
-    },
-    "Remote work — needs review": {
-        "workflow": "remote_work",
-        "employee_id": "SYN-1003",
-        "requested_location_id": "US-TX",
-    },
-    "PTO — eligible": {
-        "workflow": "pto",
-        "employee_id": "SYN-1002",
-        "requested_hours": 8.0,
-    },
+EXAMPLES = {
+    "Remote work — eligible": "I am SYN-1001. Can I work remotely from New York?",
+    "Remote work — needs review": "I am SYN-1003. Can I work remotely from Texas?",
+    "PTO — eligible": "I am SYN-1002. Can I take 8 hours of PTO?",
 }
 
 
-def submit_workflow(payload: dict[str, Any]) -> dict[str, Any]:
-    """Submit a workflow and return the API's validated JSON response."""
+def submit_message(
+    message: str,
+    history: list[dict[str, str]],
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Send one chat turn and return the assistant payload."""
 
-    response = httpx.post(f"{API_URL}/chat", json=payload, timeout=60.0)
+    response = httpx.post(
+        f"{API_URL}/chat",
+        json={"message": message, "history": history, "context": context},
+        timeout=90.0,
+    )
     response.raise_for_status()
     result = response.json()
     if not isinstance(result, dict):
@@ -60,65 +56,65 @@ def _render_result(result: dict[str, Any]) -> None:
                 st.json(step["safe_arguments"])
 
 
+def _ask(message: str) -> None:
+    history = [
+        {"role": item["role"], "content": item["content"]}
+        for item in st.session_state.messages
+    ]
+    try:
+        with st.spinner("Checking policy and synthetic HR records…"):
+            result = submit_message(message, history, st.session_state.context)
+    except (httpx.HTTPError, ValueError) as error:
+        st.session_state.messages.append(
+            {"role": "user", "content": message, "result": None}
+        )
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": f"The HR API could not complete the request: {error}",
+                "result": None,
+            }
+        )
+        return
+    st.session_state.context = result.get("context")
+    st.session_state.messages.append(
+        {"role": "user", "content": message, "result": None}
+    )
+    st.session_state.messages.append(
+        {"role": "assistant", "content": result["answer"], "result": result}
+    )
+
+
 st.set_page_config(page_title="RAGs to Riches", page_icon="💼", layout="wide")
 st.title("RAGs to Riches")
 st.caption("Synthetic HR policy guidance — not legal, employment, or benefits advice.")
 
-if "history" not in st.session_state:
-    st.session_state.history = []
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "context" not in st.session_state:
+    st.session_state.context = None
 
 with st.sidebar:
-    st.header("Demo preset")
-    preset_name = st.selectbox("Scenario", list(PRESETS))
-    if st.button("Load preset", use_container_width=True):
-        st.session_state.form_values = PRESETS[preset_name]
+    st.header("Try a question")
+    st.caption("These prompts ask the assistant. You can also type your own.")
+    for label, prompt in EXAMPLES.items():
+        if st.button(label, use_container_width=True):
+            st.session_state.pending_prompt = prompt
+    if st.button("Clear conversation", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.context = None
+        st.session_state.pending_prompt = ""
 
-values = st.session_state.get("form_values", PRESETS["Remote work — eligible"])
-with st.form("workflow"):
-    workflow = st.selectbox(
-        "Workflow",
-        ["remote_work", "pto"],
-        index=0 if values["workflow"] == "remote_work" else 1,
-        format_func=lambda item: item.replace("_", " ").title(),
-    )
-    employee_id = st.text_input("Synthetic employee ID", values["employee_id"])
-    requested_location_id = None
-    requested_hours = None
-    if workflow == "remote_work":
-        requested_location_id = st.text_input(
-            "Requested location ID", values.get("requested_location_id", "")
-        )
-    else:
-        requested_hours = st.number_input(
-            "Requested PTO hours",
-            min_value=0.5,
-            value=float(values.get("requested_hours", 8.0)),
-            step=0.5,
-        )
-    create_ticket = st.checkbox("Propose a mock HR ticket")
-    confirmed = st.checkbox(
-        "I explicitly confirm creation of the mock ticket",
-        disabled=not create_ticket,
-    )
-    submitted = st.form_submit_button("Ask HR assistant", type="primary")
+for item in st.session_state.messages:
+    with st.chat_message(item["role"]):
+        if item["role"] == "assistant" and item.get("result"):
+            _render_result(item["result"])
+        else:
+            st.markdown(item["content"])
 
-if submitted:
-    payload: dict[str, Any] = {
-        "workflow": workflow,
-        "employee_id": employee_id,
-        "create_ticket": create_ticket,
-        "confirmed": confirmed,
-    }
-    if workflow == "remote_work":
-        payload["requested_location_id"] = requested_location_id or None
-    else:
-        payload["requested_hours"] = requested_hours
-    try:
-        with st.spinner("Checking policy and synthetic HR records…"):
-            result = submit_workflow(payload)
-        st.session_state.history.insert(0, result)
-    except (httpx.HTTPError, ValueError) as error:
-        st.error(f"The HR API could not complete the request: {error}")
-
-for item in st.session_state.history:
-    _render_result(item)
+pending = st.session_state.pop("pending_prompt", None)
+prompt = st.chat_input("Ask about HR policy, remote work, or PTO")
+message = pending or prompt
+if message:
+    _ask(message)
+    st.rerun()

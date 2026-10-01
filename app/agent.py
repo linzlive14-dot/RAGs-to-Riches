@@ -1,11 +1,15 @@
-"""Explicit, inspectable state-machine orchestration for HR workflows."""
+"""Explicit, inspectable orchestration for conversational HR workflows."""
 
 from __future__ import annotations
 
 from enum import StrEnum
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.intent import ParsedIntent, is_unsafe_message, resolve_intent
+from rag.answering import REFUSAL
+from rag.guardrails import has_sufficient_evidence
 
 
 class ToolClient(Protocol):
@@ -16,9 +20,20 @@ class AnswerSynthesizer(Protocol):
     async def synthesize(self, evidence: dict[str, Any]) -> str: ...
 
 
+class IntentExtractor(Protocol):
+    async def extract(
+        self,
+        message: str,
+        history: list[dict[str, str]],
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+
 class Workflow(StrEnum):
     REMOTE_WORK = "remote_work"
     PTO = "pto"
+    POLICY_QA = "policy_qa"
+    UNSUPPORTED = "unsupported"
 
 
 class AgentState(StrEnum):
@@ -38,6 +53,42 @@ class WorkflowRequest(BaseModel):
     requested_hours: float | None = Field(default=None, gt=0)
     create_ticket: bool = False
     confirmed: bool = False
+    user_message: str | None = None
+
+    @field_validator("workflow")
+    @classmethod
+    def _structured_workflow(cls, value: Workflow) -> Workflow:
+        if value not in {Workflow.REMOTE_WORK, Workflow.PTO}:
+            raise ValueError("workflow must be remote_work or pto")
+        return value
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=2_000)
+
+
+class ChatContext(BaseModel):
+    workflow: Workflow | None = None
+    employee_id: str | None = None
+    requested_location_id: str | None = None
+    requested_hours: float | None = None
+    create_ticket: bool = False
+    awaiting_confirmation: bool = False
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2_000)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=20)
+    context: ChatContext | None = None
+
+    @field_validator("message")
+    @classmethod
+    def _message_not_blank(cls, value: str) -> str:
+        cleaned = " ".join(value.split())
+        if not cleaned:
+            raise ValueError("Message cannot be empty")
+        return cleaned
 
 
 class TraceStep(BaseModel):
@@ -63,6 +114,7 @@ class WorkflowResult(BaseModel):
     citations: list[Citation] = Field(default_factory=list)
     trace: list[TraceStep]
     mock_action: dict[str, Any] | None = None
+    context: ChatContext | None = None
 
 
 class HRAgent:
@@ -72,9 +124,11 @@ class HRAgent:
         self,
         tools: ToolClient,
         synthesizer: AnswerSynthesizer | None = None,
+        intent_extractor: IntentExtractor | None = None,
     ) -> None:
         self.tools = tools
         self.synthesizer = synthesizer
+        self.intent_extractor = intent_extractor
 
     async def _call(
         self,
@@ -84,9 +138,7 @@ class HRAgent:
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
         safe_arguments = {
-            key: value
-            for key, value in arguments.items()
-            if key not in {"confirmed"}
+            key: value for key, value in arguments.items() if key not in {"confirmed"}
         }
         try:
             result = await self.tools.call_tool(tool, arguments)
@@ -121,24 +173,28 @@ class HRAgent:
 
     @staticmethod
     def _summary(tool: str, result: dict[str, Any]) -> str:
+        if result.get("found") is False:
+            return str(result.get("reason") or f"{tool} found no matching record")
         if tool == "search_policy_documents":
             return f"Retrieved {len(result.get('results', []))} policy chunks"
         if tool == "check_policy_compliance":
-            return f"Compliance outcome: {result.get('decision', 'unknown')}"
+            reason = result.get("reason")
+            decision = result.get("decision", "unknown")
+            return f"Compliance outcome: {decision}" + (f". {reason}" if reason else "")
         if tool == "create_mock_hr_ticket":
-            return (
-                "Mock ticket created"
-                if result.get("created")
-                else "Mock ticket awaiting explicit confirmation"
-            )
+            if result.get("created"):
+                return "Mock ticket created"
+            if result.get("rejected"):
+                return str(result.get("reason") or "Mock ticket was rejected")
+            return "Mock ticket awaiting explicit confirmation"
         return f"{tool} returned a synthetic record"
 
     @staticmethod
     def _citations(policy_result: dict[str, Any], *, limit: int = 3) -> list[Citation]:
         citations: list[Citation] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[str] = set()
         for result in policy_result.get("results", []):
-            key = (result["source"], result["section"])
+            key = result["source"]
             if key in seen:
                 continue
             seen.add(key)
@@ -154,13 +210,310 @@ class HRAgent:
                 break
         return citations
 
-    async def run(self, request: WorkflowRequest) -> WorkflowResult:
-        trace = [
-            TraceStep(
-                state=AgentState.CLASSIFY,
-                result_summary=f"Selected {request.workflow.value} workflow from structured input",
-            )
+    @staticmethod
+    def _fallback_answer(evidence: dict[str, Any], citations: list[Citation]) -> str:
+        references = " ".join(f"[{item.citation_id}]" for item in citations)
+        findings = [
+            finding
+            for finding in evidence.get("findings", [])
+            if isinstance(finding, dict) and finding.get("reason") and finding.get("found") is False
         ]
+        if findings:
+            return f"{findings[0]['reason']} No action was taken."
+        missing = evidence.get("missing") or []
+        if missing:
+            return (
+                "Please provide the "
+                + ", ".join(str(item) for item in missing)
+                + " before I check policy eligibility."
+            )
+        if evidence.get("blocked"):
+            return (
+                "I can help with synthetic HR policy and workflow questions. "
+                "I can't override system instructions or reveal secrets."
+            )
+        if evidence.get("grounded") is False:
+            return REFUSAL
+        decision = evidence.get("decision")
+        if decision == "needs_clarification":
+            return str(
+                evidence.get("reason")
+                or "More information is required before I can check eligibility."
+            )
+        name = evidence.get("employee_name") or "The employee"
+        workflow = str(evidence.get("workflow", "request")).replace("_", " ")
+        if decision == "eligible_for_review":
+            return (
+                f"{name} meets the automated prerequisites for {workflow} review, "
+                f"but manager/HR approval is still required. {references}"
+            ).strip()
+        if decision == "escalate":
+            failed = [
+                check["name"]
+                for check in evidence.get("checks", [])
+                if isinstance(check, dict) and not check.get("passed", True)
+            ]
+            return (
+                "The request needs HR review because these checks did not pass: "
+                f"{', '.join(failed) or 'manual review required'}. {references}"
+            ).strip()
+        if citations:
+            claims = " ".join(f"{item.snippet} [{item.citation_id}]" for item in citations)
+            return f"Policy guidance: {claims}"
+        return "I need a more specific HR policy question before I can help."
+
+    def _context_for(
+        self,
+        request: WorkflowRequest,
+        *,
+        awaiting_confirmation: bool = False,
+    ) -> ChatContext:
+        return ChatContext(
+            workflow=request.workflow,
+            employee_id=request.employee_id,
+            requested_location_id=request.requested_location_id,
+            requested_hours=request.requested_hours,
+            create_ticket=request.create_ticket,
+            awaiting_confirmation=awaiting_confirmation,
+        )
+
+    async def _speak(
+        self,
+        trace: list[TraceStep],
+        evidence: dict[str, Any],
+        citations: list[Citation],
+    ) -> str:
+        fallback = self._fallback_answer(evidence, citations)
+        summary = "Assembled cited guidance deterministically"
+        answer = fallback
+        if self.synthesizer is not None:
+            try:
+                answer = await self.synthesizer.synthesize(evidence)
+                summary = "Generated grounded guidance with the configured LLM"
+            except Exception:
+                summary = "LLM generation failed validation; used safe deterministic guidance"
+                answer = fallback
+        trace.append(
+            TraceStep(
+                state=AgentState.SYNTHESIZE,
+                result_summary=summary,
+                sources=[citation.source for citation in citations],
+            )
+        )
+        return answer
+
+    async def _finish(
+        self,
+        *,
+        workflow: Workflow,
+        status: Literal["completed", "needs_clarification", "confirmation_required", "escalated"],
+        trace: list[TraceStep],
+        evidence: dict[str, Any],
+        citations: list[Citation] | None = None,
+        mock_action: dict[str, Any] | None = None,
+        context: ChatContext | None = None,
+        terminal_state: AgentState | None = None,
+    ) -> WorkflowResult:
+        citations = citations or []
+        answer = await self._speak(trace, evidence, citations)
+        if terminal_state is not None:
+            trace.append(
+                TraceStep(
+                    state=terminal_state,
+                    result_summary="Workflow completed without hidden reasoning",
+                )
+            )
+        return WorkflowResult(
+            workflow=workflow,
+            status=status,
+            answer=answer,
+            citations=citations,
+            trace=trace,
+            mock_action=mock_action,
+            context=context,
+        )
+
+    async def chat(self, request: ChatRequest) -> WorkflowResult:
+        context_data = request.context.model_dump() if request.context else None
+        if is_unsafe_message(request.message):
+            trace = [
+                TraceStep(
+                    state=AgentState.CLASSIFY,
+                    status="skipped",
+                    result_summary="Blocked unsafe request before any tool call",
+                )
+            ]
+            return await self._finish(
+                workflow=Workflow.UNSUPPORTED,
+                status="escalated",
+                trace=trace,
+                evidence={
+                    "workflow": Workflow.UNSUPPORTED.value,
+                    "blocked": True,
+                    "findings": [
+                        {
+                            "found": False,
+                            "reason": "The request tries to override controls or reveal secrets.",
+                        }
+                    ],
+                    "user_message_redacted": True,
+                },
+                context=ChatContext(workflow=Workflow.UNSUPPORTED),
+                terminal_state=AgentState.ESCALATE,
+            )
+
+        model_intent: ParsedIntent | None = None
+        note = "Resolved the workflow from the user message"
+        if self.intent_extractor is not None:
+            try:
+                model_intent = ParsedIntent.model_validate(
+                    await self.intent_extractor.extract(
+                        request.message,
+                        [turn.model_dump() for turn in request.history],
+                        context_data,
+                    )
+                )
+                note = "Resolved user intent with the configured LLM"
+            except Exception:
+                note = "LLM intent extraction failed; resolved the user message deterministically"
+        parsed = resolve_intent(request.message, context_data, model_intent)
+        if model_intent is not None and parsed.intent != model_intent.intent:
+            note += f"; kept {parsed.intent} from explicit wording in the message"
+        trace = [TraceStep(state=AgentState.CLASSIFY, result_summary=note)]
+
+        if parsed.intent == "unsafe":
+            trace.append(
+                TraceStep(
+                    state=AgentState.ESCALATE,
+                    status="skipped",
+                    result_summary="Blocked unsafe request before any tool call",
+                )
+            )
+            return await self._finish(
+                workflow=Workflow.UNSUPPORTED,
+                status="escalated",
+                trace=trace,
+                evidence={"workflow": "unsupported", "blocked": True},
+                context=ChatContext(workflow=Workflow.UNSUPPORTED),
+                terminal_state=AgentState.ESCALATE,
+            )
+
+        if parsed.intent in {"policy_qa", "out_of_scope"}:
+            return await self._policy_qa(request.message, trace)
+
+        workflow = Workflow(parsed.intent)
+        missing: list[str] = []
+        if not parsed.employee_id:
+            missing.append("synthetic employee ID (SYN-####)")
+        if workflow == Workflow.REMOTE_WORK and not parsed.requested_location_id:
+            missing.append("requested work location")
+        if workflow == Workflow.PTO and parsed.requested_hours is None:
+            missing.append("requested PTO hours")
+        if missing:
+            trace.append(
+                TraceStep(
+                    state=AgentState.ESCALATE,
+                    status="skipped",
+                    result_summary="Clarification required: missing " + ", ".join(missing),
+                )
+            )
+            return await self._finish(
+                workflow=workflow,
+                status="needs_clarification",
+                trace=trace,
+                evidence={
+                    "workflow": workflow.value,
+                    "missing": missing,
+                    "answer_instruction": (
+                        "Ask only for the missing details. Do not say the policy corpus lacks support."
+                    ),
+                    "user_message": request.message,
+                },
+                context=ChatContext(
+                    workflow=workflow,
+                    employee_id=parsed.employee_id,
+                    requested_location_id=parsed.requested_location_id,
+                    requested_hours=parsed.requested_hours,
+                    create_ticket=parsed.create_ticket,
+                ),
+            )
+
+        employee_id = parsed.employee_id
+        assert employee_id is not None
+        structured = WorkflowRequest(
+            workflow=workflow,
+            employee_id=employee_id,
+            requested_location_id=parsed.requested_location_id,
+            requested_hours=parsed.requested_hours,
+            create_ticket=parsed.create_ticket,
+            confirmed=parsed.confirmed,
+            user_message=request.message,
+        )
+        return await self.run(structured, trace=trace)
+
+    async def _policy_qa(self, message: str, trace: list[TraceStep]) -> WorkflowResult:
+        try:
+            policies = await self._call(
+                trace,
+                AgentState.RETRIEVE,
+                "search_policy_documents",
+                {"query": message, "top_k": 8},
+            )
+        except Exception:
+            return WorkflowResult(
+                workflow=Workflow.POLICY_QA,
+                status="escalated",
+                answer="A required HR tool was unavailable. No action was taken; contact HR.",
+                trace=trace,
+                context=ChatContext(workflow=Workflow.POLICY_QA),
+            )
+        texts = [
+            str(item.get("text") or item.get("snippet") or "")
+            for item in policies.get("results", [])
+            if isinstance(item, dict)
+        ]
+        grounded = bool(texts) and has_sufficient_evidence(message, texts)
+        citations = self._citations(policies) if grounded else []
+        status: Literal["completed", "escalated"] = "completed" if grounded else "escalated"
+        return await self._finish(
+            workflow=Workflow.POLICY_QA,
+            status=status,
+            trace=trace,
+            evidence={
+                "workflow": Workflow.POLICY_QA.value,
+                "decision": "policy_guidance" if grounded else "unsupported",
+                "grounded": grounded,
+                "citations": [citation.model_dump() for citation in citations],
+                "user_message": message,
+                "findings": []
+                if grounded
+                else [
+                    {
+                        "found": False,
+                        "reason": "The policy corpus does not contain enough support for this question.",
+                    }
+                ],
+            },
+            citations=citations,
+            context=ChatContext(workflow=Workflow.POLICY_QA),
+            terminal_state=AgentState.COMPLETE if grounded else AgentState.ESCALATE,
+        )
+
+    async def run(
+        self,
+        request: WorkflowRequest,
+        *,
+        trace: list[TraceStep] | None = None,
+    ) -> WorkflowResult:
+        if trace is None:
+            trace = [
+                TraceStep(
+                    state=AgentState.CLASSIFY,
+                    result_summary=(
+                        f"Selected {request.workflow.value} workflow from structured input"
+                    ),
+                )
+            ]
         missing = (
             request.workflow == Workflow.REMOTE_WORK and not request.requested_location_id
         ) or (request.workflow == Workflow.PTO and request.requested_hours is None)
@@ -177,13 +530,24 @@ class HRAgent:
                     result_summary=f"Clarification required: missing {needed}",
                 )
             )
-            return WorkflowResult(
+            return await self._finish(
                 workflow=request.workflow,
                 status="needs_clarification",
-                answer=f"Please provide the {needed} before I check policy eligibility.",
                 trace=trace,
+                evidence={
+                    "workflow": request.workflow.value,
+                    "missing": [needed],
+                    "answer_instruction": (
+                        "Ask only for the missing details. Do not say the policy corpus lacks support."
+                    ),
+                    "user_message": request.user_message,
+                },
+                context=self._context_for(request),
             )
 
+        employee: dict[str, Any] | None = None
+        policies: dict[str, Any] | None = None
+        compliance: dict[str, Any] | None = None
         try:
             employee = await self._call(
                 trace,
@@ -191,6 +555,23 @@ class HRAgent:
                 "lookup_employee_profile",
                 {"employee_id": request.employee_id},
             )
+            if employee.get("found") is False:
+                return await self._finish(
+                    workflow=request.workflow,
+                    status="needs_clarification",
+                    trace=trace,
+                    evidence={
+                        "workflow": request.workflow.value,
+                        "findings": [employee],
+                        "missing": ["synthetic employee ID (SYN-####) that exists in the directory"],
+                        "answer_instruction": (
+                            "Explain that this employee ID was not found and ask for a valid "
+                            "SYN-#### ID. Do not say the policy corpus lacks support."
+                        ),
+                        "user_message": request.user_message,
+                    },
+                    context=self._context_for(request),
+                )
             if request.workflow == Workflow.REMOTE_WORK:
                 policy_query = (
                     "fully remote eligibility tenure performance supported location "
@@ -205,12 +586,29 @@ class HRAgent:
                 policy_query = (
                     "PTO available balance request notice manager approval protected leave"
                 )
-                await self._call(
+                balance = await self._call(
                     trace,
                     AgentState.RETRIEVE,
                     "check_pto_balance",
                     {"employee_id": request.employee_id},
                 )
+                if balance.get("found") is False:
+                    return await self._finish(
+                        workflow=request.workflow,
+                        status="needs_clarification",
+                        trace=trace,
+                        evidence={
+                            "workflow": request.workflow.value,
+                            "employee_name": employee["employee"]["name"],
+                            "findings": [balance],
+                            "answer_instruction": (
+                                "Explain the missing PTO record and ask the user to correct the "
+                                "employee ID. Do not say the policy corpus lacks support."
+                            ),
+                            "user_message": request.user_message,
+                        },
+                        context=self._context_for(request),
+                    )
                 compliance_arguments = {
                     "workflow": request.workflow.value,
                     "employee_id": request.employee_id,
@@ -234,53 +632,42 @@ class HRAgent:
                 status="escalated",
                 answer="A required HR tool was unavailable. No action was taken; contact HR.",
                 trace=trace,
+                context=self._context_for(request),
             )
 
+        assert employee is not None and policies is not None and compliance is not None
         citations = self._citations(policies)
-        references = " ".join(f"[{item.citation_id}]" for item in citations)
-        decision = compliance["decision"]
-        name = employee["employee"]["name"]
-        if decision == "eligible_for_review":
-            fallback_answer = (
-                f"{name} meets the automated prerequisites for {request.workflow.value.replace('_', ' ')} "
-                f"review, but manager/HR approval is still required. {references}"
-            )
-            status: Literal["completed", "escalated"] = "completed"
+        decision = compliance.get("decision")
+        if decision == "needs_clarification":
+            status: Literal[
+                "completed", "needs_clarification", "confirmation_required", "escalated"
+            ] = "needs_clarification"
+        elif decision == "eligible_for_review":
+            status = "completed"
         else:
-            failed = [
-                check["name"] for check in compliance.get("checks", []) if not check["passed"]
-            ]
-            fallback_answer = (
-                f"The request needs HR review because these checks did not pass: "
-                f"{', '.join(failed) or 'manual review required'}. {references}"
-            )
             status = "escalated"
-
-        answer = fallback_answer
-        synthesis_summary = "Assembled cited guidance deterministically"
-        if self.synthesizer is not None:
-            evidence = {
-                "workflow": request.workflow.value,
-                "employee_name": name,
-                "decision": decision,
-                "checks": compliance.get("checks", []),
-                "citations": [citation.model_dump() for citation in citations],
-            }
-            try:
-                answer = await self.synthesizer.synthesize(evidence)
-                synthesis_summary = "Generated grounded guidance with the configured LLM"
-            except Exception:
-                synthesis_summary = (
-                    "LLM generation failed validation; used safe deterministic guidance"
-                )
-        trace.append(
-            TraceStep(
-                state=AgentState.SYNTHESIZE,
-                result_summary=synthesis_summary,
-                sources=[citation.source for citation in citations],
+        evidence = {
+            "workflow": request.workflow.value,
+            "employee_name": employee["employee"]["name"],
+            "decision": decision,
+            "checks": compliance.get("checks", []),
+            "findings": [compliance] if compliance.get("found") is False else [],
+            "citations": [citation.model_dump() for citation in citations],
+            "grounded": True,
+            "user_message": request.user_message,
+            "reason": compliance.get("reason"),
+        }
+        if status == "needs_clarification":
+            return await self._finish(
+                workflow=request.workflow,
+                status=status,
+                trace=trace,
+                evidence=evidence,
+                citations=citations,
+                context=self._context_for(request),
             )
-        )
 
+        answer = await self._speak(trace, evidence, citations)
         mock_action: dict[str, Any] | None = None
         if request.create_ticket:
             summary = (
@@ -306,16 +693,34 @@ class HRAgent:
                     answer=answer + " The mock ticket action failed; no action was taken.",
                     citations=citations,
                     trace=trace,
+                    context=self._context_for(request),
                 )
-            if not mock_action.get("created"):
-                trace[-1].status = "confirmation_required"
+            if mock_action.get("found") is False or mock_action.get("rejected"):
+                reason = str(mock_action.get("reason") or "The mock ticket was not created.")
+                if reason not in answer:
+                    answer = f"{answer} {reason}"
                 return WorkflowResult(
                     workflow=request.workflow,
-                    status="confirmation_required",
-                    answer=answer + " Confirm explicitly if you want me to create the displayed mock ticket.",
+                    status="needs_clarification" if mock_action.get("found") is False else "escalated",
+                    answer=answer,
                     citations=citations,
                     trace=trace,
                     mock_action=mock_action,
+                    context=self._context_for(request),
+                )
+            if not mock_action.get("created"):
+                trace[-1].status = "confirmation_required"
+                suffix = " Confirm explicitly if you want me to create the displayed mock ticket."
+                if suffix.strip() not in answer:
+                    answer += suffix
+                return WorkflowResult(
+                    workflow=request.workflow,
+                    status="confirmation_required",
+                    answer=answer,
+                    citations=citations,
+                    trace=trace,
+                    mock_action=mock_action,
+                    context=self._context_for(request, awaiting_confirmation=True),
                 )
 
         trace.append(
@@ -331,4 +736,5 @@ class HRAgent:
             citations=citations,
             trace=trace,
             mock_action=mock_action,
+            context=self._context_for(request),
         )

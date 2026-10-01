@@ -24,10 +24,12 @@ flowchart LR
 ```
 
 The orchestrator exposes states and tool activity, not hidden chain-of-thought.
-Retrieval and compliance decisions remain deterministic. When
-`OPENROUTER_API_KEY` is configured, an LLM turns the validated evidence into
-the final cited answer. Invalid or unavailable model output falls back to safe
-deterministic wording.
+A chat message is classified into a policy question, remote-work request, or
+PTO request. Retrieval and compliance decisions remain deterministic. Tool
+misses, such as an unknown employee or location, come back as findings the
+assistant can explain. When `OPENROUTER_API_KEY` is configured, an LLM
+interprets the message and writes the cited answer from that evidence.
+Invalid or unavailable model output falls back to safe deterministic wording.
 
 ## Run locally
 
@@ -43,17 +45,25 @@ cp .env.example .env
 python -m rag build
 ```
 
-Set `OPENROUTER_API_KEY` in `.env` to enable LLM-generated answers. You can
-optionally change `OPENROUTER_MODEL` from the default
-`inclusionai/ling-3.0-flash-vl:free` model. Never commit the key.
+The copied `.env` leaves `OPENROUTER_API_KEY` blank. Open that file and put your key on the existing line:
+
+```bash
+OPENROUTER_API_KEY=your_key_here
+```
+
+That enables LLM-generated answers. You can optionally change `OPENROUTER_MODEL` from the default `inclusionai/ling-3.0-flash-vl:free` model. Never commit the key.
+
+The install and `python -m rag build` only need to run once. Each new terminal starts without the virtual environment, so activate it from the project directory before starting a process. Otherwise `uvicorn` and `streamlit` are not on your PATH.
 
 Start the API and UI in separate terminals:
 
 ```bash
+source .venv/bin/activate
 uvicorn app.main:app --reload
 ```
 
 ```bash
+source .venv/bin/activate
 streamlit run app/streamlit_app.py
 ```
 
@@ -63,14 +73,25 @@ used in production, run `PORT=8501 python -m app.deploy`.
 
 ## Use the chatbot
 
-- Remote work: use `SYN-1001` and `US-NY` for an eligible-for-review result, or
-  `SYN-1003` and `US-TX` for an escalation.
-- PTO: use `SYN-1002` and `8` hours for an eligible-for-review result.
-- Mock action: select “Propose a mock HR ticket.” The first request asks for
-  confirmation; a ticket is written only after explicit confirmation.
+Type a question in the chat box, or start from one of the sidebar examples:
 
-Each result includes policy citation cards and an expandable trace of states,
-safe tool arguments, summaries, and source names.
+- `I am SYN-1001. Can I work remotely from New York?` is eligible for review.
+- `I am SYN-1003. Can I work remotely from Texas?` needs HR review.
+- `I am SYN-1002. Can I take 8 hours of PTO?` is eligible for review.
+- Ask a policy question, such as `Can I use PTO during parental leave?`
+- To propose a mock ticket, add `Please create a mock HR ticket` to a request.
+  The assistant asks you to confirm. Reply `Yes` and the ticket is written only
+  after that confirmation.
+
+`POST /chat` accepts `{"message": "...", "history": [...], "context": {...}}`
+and returns the answer, citations, snippets, and tool trace. Each result
+includes policy citation cards and an expandable trace of states, safe tool
+arguments, summaries, and source names.
+
+Graded evaluation calls the configured LLM and scores those answers. It
+requires `OPENROUTER_API_KEY`. Add that key as a GitHub Actions secret so CI
+can run `python -m evaluation.runner`. Pytest still covers the offline tool
+path without a key.
 
 ## Retrieval and MCP
 
@@ -79,9 +100,30 @@ synthetic. `policies/manifest.json` records provenance and AI assistance.
 Heading-aware chunks use fixed overlap, stable SHA-256 identifiers, SQLite FTS5
 BM25 ranking, and deterministic tie-breaking.
 
+The commands below are optional examples for inspecting that index from a
+terminal. Activate the virtual environment first. `search` and `answer` use the
+index created by `python -m rag build`. The quoted text is a sample query you
+can replace.
+
+Search prints the top five matching policy chunks as JSON, including title,
+section, source, snippet, and score:
+
 ```bash
 python -m rag search "fully remote tenure and location approval"
+```
+
+Answer prints a short cited reply assembled from matching policy sentences. If
+the index lacks enough support, the JSON label is `Escalation` and the text
+tells the reader to contact HR:
+
+```bash
 python -m rag answer "Can I use PTO during parental leave?"
+```
+
+This last example starts the MCP tool server on standard input and output and
+waits for a client. The chatbot already starts this server when you use the UI:
+
+```bash
 python -m hr_mcp.server
 ```
 

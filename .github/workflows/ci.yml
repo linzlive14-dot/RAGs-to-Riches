@@ -16,7 +16,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,6 +34,8 @@ jobs:
       - name: Run automated tests
         run: pytest
       - name: Run gold evaluation and ablation
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: python -m evaluation.runner
       - name: Upload evaluation evidence
         uses: actions/upload-artifact@v4

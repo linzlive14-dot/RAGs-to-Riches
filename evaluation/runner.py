@@ -9,12 +9,19 @@ import statistics
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from app.agent import HRAgent, WorkflowRequest
+from app.agent import HRAgent, WorkflowResult
+from app.agent import ChatRequest as AgentChatRequest
+from app.config import get_settings
+from app.llm import (
+    OpenRouterClient,
+    OpenRouterIntentExtractor,
+    OpenRouterJudge,
+    OpenRouterSynthesizer,
+)
 from hr_mcp.client import HRMCPClient
 from rag.answering import answer_query
-from rag.guardrails import UnsafeQueryError
 from rag.index import PolicyIndex
 from rag.ingestion import chunk_documents, load_documents
 
@@ -71,27 +78,95 @@ def _build_index(path: Path, *, chunk_size: int = 180, overlap: int = 30) -> Pol
     return index
 
 
-def _retrieval_scores(
-    task: dict[str, Any], index: PolicyIndex, *, top_k: int
-) -> tuple[dict[str, bool], dict[str, Any]]:
-    answer = answer_query(index, task["query"], top_k=top_k)
+def _tool_names(result: WorkflowResult) -> list[str]:
+    return [step.tool for step in result.trace if step.tool]
+
+
+def _answer_source(result: WorkflowResult) -> str:
+    for step in result.trace:
+        if step.state == "synthesize" and "configured LLM" in step.result_summary:
+            return "llm"
+        if step.state == "synthesize" and "failed validation" in step.result_summary:
+            return "fallback"
+    return "deterministic"
+
+
+def _citations_valid(result: WorkflowResult) -> bool:
+    if not result.citations:
+        return False
+    return all(f"[{citation.citation_id}]" in result.answer for citation in result.citations)
+
+
+def _structural_scores(task: dict[str, Any], result: WorkflowResult) -> dict[str, bool]:
     expected = task["expected"]
-    actual_sources = {citation.source for citation in answer.citations}
-    expected_sources = set(expected["sources_any"])
-    grounded = answer.grounded == expected["grounded"]
-    source_match = not expected_sources or bool(actual_sources & expected_sources)
-    citations_valid = (
-        not answer.grounded
-        or bool(answer.citations)
-        and all(f"[{citation.citation_id}]" in answer.text for citation in answer.citations)
+    tools = _tool_names(result)
+    scores: dict[str, bool] = {}
+    if task["kind"] == "workflow":
+        status_match = result.status == expected["status"]
+        scores["tool_selection"] = tools == expected["tools"]
+        scores["workflow"] = status_match
+        scores["clarification"] = (
+            status_match if expected["status"] == "needs_clarification" else True
+        )
+        scores["safety"] = not result.mock_action or not result.mock_action.get("created", False)
+        if "search_policy_documents" in expected["tools"]:
+            scores["groundedness"] = bool(result.citations)
+            scores["citations"] = _citations_valid(result)
+    elif task["kind"] == "retrieval":
+        actual_sources = {citation.source for citation in result.citations}
+        expected_sources = set(expected["sources_any"])
+        if expected["grounded"]:
+            scores["groundedness"] = (
+                result.status == "completed" and bool(actual_sources & expected_sources)
+            )
+            scores["citations"] = _citations_valid(result)
+        else:
+            scores["groundedness"] = result.status == "escalated" and not result.citations
+            scores["citations"] = not result.citations
+        scores["tool_selection"] = tools == ["search_policy_documents"]
+        scores["safety"] = True
+    else:
+        blocked = any(
+            "Blocked unsafe request" in step.result_summary for step in result.trace
+        )
+        scores["safety"] = blocked and result.status == "escalated"
+        scores["tool_selection"] = tools == []
+    return scores
+
+
+def _judge_evidence(result: WorkflowResult) -> dict[str, Any]:
+    return {
+        "status": result.status,
+        "workflow": result.workflow.value,
+        "citations": [citation.model_dump() for citation in result.citations],
+        "trace": [
+            {
+                "state": step.state.value,
+                "tool": step.tool,
+                "result_summary": step.result_summary,
+            }
+            for step in result.trace
+        ],
+    }
+
+
+def _llm_clients() -> tuple[OpenRouterSynthesizer, OpenRouterIntentExtractor, OpenRouterJudge]:
+    settings = get_settings()
+    if settings.openrouter_api_key is None:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is required so evaluation scores LLM answers "
+            "instead of deterministic fallback text."
+        )
+    client = OpenRouterClient(
+        settings.openrouter_api_key.get_secret_value(),
+        model=settings.openrouter_model,
+        base_url=settings.openrouter_base_url,
+        timeout_seconds=max(settings.openrouter_timeout_seconds, 45.0),
     )
     return (
-        {"groundedness": grounded and source_match, "citations": citations_valid},
-        {
-            "grounded": answer.grounded,
-            "sources": sorted(actual_sources),
-            "label": answer.label,
-        },
+        OpenRouterSynthesizer(client),
+        OpenRouterIntentExtractor(client),
+        OpenRouterJudge(client),
     )
 
 
@@ -100,8 +175,21 @@ async def run_evaluation(
     tasks_path: Path = DEFAULT_TASKS,
     output_path: Path | None = None,
     top_k: int = 5,
+    mode: Literal["offline", "llm"] = "offline",
 ) -> dict[str, Any]:
-    """Execute the gold set and return a machine-readable score report."""
+    """Execute the gold set and return a machine-readable score report.
+
+    ``offline`` checks tool behavior and citation structure without a model.
+    ``llm`` scores the configured model's answers with an LLM judge.
+    ``top_k`` is retained for callers; chat retrieval uses the agent's top_k.
+    """
+
+    del top_k
+    synthesizer = None
+    intent_extractor = None
+    judge = None
+    if mode == "llm":
+        synthesizer, intent_extractor, judge = _llm_clients()
 
     tasks = load_tasks(tasks_path)
     task_results: list[dict[str, Any]] = []
@@ -120,56 +208,40 @@ async def run_evaluation(
 
     with tempfile.TemporaryDirectory(prefix="hr-evaluation-") as directory:
         build_started = time.perf_counter()
-        index = _build_index(Path(directory) / "policy.sqlite3")
+        index_path = Path(directory) / "policy.sqlite3"
+        _build_index(index_path)
         index_build_ms = (time.perf_counter() - build_started) * 1_000
 
         startup_started = time.perf_counter()
-        async with HRMCPClient() as client:
+        async with HRMCPClient(env={"HR_POLICY_INDEX": str(index_path)}) as client:
             mcp_startup_ms = (time.perf_counter() - startup_started) * 1_000
-            agent = HRAgent(client)
+            agent = HRAgent(
+                client,
+                synthesizer=synthesizer,
+                intent_extractor=intent_extractor,
+            )
             for task in tasks:
                 started = time.perf_counter()
-                scores: dict[str, bool]
-                actual: dict[str, Any]
-                if task["kind"] == "workflow":
-                    result = await agent.run(WorkflowRequest.model_validate(task["request"]))
-                    expected = task["expected"]
-                    tools = [step.tool for step in result.trace if step.tool]
-                    status_match = result.status == expected["status"]
-                    scores = {
-                        "tool_selection": tools == expected["tools"],
-                        "workflow": status_match,
-                        "clarification": (
-                            status_match
-                            if expected["status"] == "needs_clarification"
-                            else True
-                        ),
-                        "safety": (
-                            not result.mock_action or not result.mock_action.get("created", False)
-                        ),
-                    }
-                    if "search_policy_documents" in expected["tools"]:
-                        scores["groundedness"] = bool(result.citations)
-                        scores["citations"] = bool(result.citations) and all(
-                            f"[{citation.citation_id}]" in result.answer
-                            for citation in result.citations
-                        )
-                    actual = {
-                        "status": result.status,
-                        "tools": tools,
-                        "citation_sources": [item.source for item in result.citations],
-                    }
-                elif task["kind"] == "retrieval":
-                    scores, actual = _retrieval_scores(task, index, top_k=top_k)
-                else:
-                    blocked = False
-                    try:
-                        answer_query(index, task["query"], top_k=top_k)
-                    except UnsafeQueryError:
-                        blocked = True
-                    scores = {"safety": blocked}
-                    actual = {"blocked": blocked}
-
+                result = await agent.chat(AgentChatRequest(message=task["message"]))
+                scores = _structural_scores(task, result)
+                source = _answer_source(result)
+                if mode == "llm" and source != "llm":
+                    if "groundedness" in scores:
+                        scores["groundedness"] = False
+                    if "citations" in scores:
+                        scores["citations"] = False
+                elif judge is not None and "groundedness" in scores:
+                    judged = await judge.score(
+                        answer=result.answer,
+                        evidence=_judge_evidence(result),
+                        rubric={
+                            "facts": task.get("facts", []),
+                            "expected_status": task["expected"].get("status"),
+                            "sources_any": task["expected"].get("sources_any", []),
+                        },
+                    )
+                    scores["groundedness"] = scores["groundedness"] and judged["grounded"]
+                    scores["citations"] = scores["citations"] and judged["citations_accurate"]
                 elapsed_ms = (time.perf_counter() - started) * 1_000
                 warm_latencies.append(elapsed_ms)
                 for metric, passed in scores.items():
@@ -180,7 +252,13 @@ async def run_evaluation(
                         "kind": task["kind"],
                         "passed": all(scores.values()),
                         "scores": scores,
-                        "actual": actual,
+                        "answer_source": source,
+                        "actual": {
+                            "status": result.status,
+                            "tools": _tool_names(result),
+                            "citation_sources": [item.source for item in result.citations],
+                            "answer": result.answer,
+                        },
                         "latency_ms": round(elapsed_ms, 3),
                     }
                 )
@@ -192,6 +270,7 @@ async def run_evaluation(
     report: dict[str, Any] = {
         "task_count": len(tasks),
         "passed": sum(result["passed"] for result in task_results),
+        "answer_source": "llm" if mode == "llm" else "deterministic",
         "metrics": metrics,
         "latency": {
             "cold": _latency_summary([index_build_ms, mcp_startup_ms]),
@@ -276,7 +355,12 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--ablation-output", type=Path, default=DEFAULT_ABLATION)
     args = parser.parse_args()
-    report = asyncio.run(run_evaluation(tasks_path=args.tasks, output_path=args.output))
+    try:
+        report = asyncio.run(
+            run_evaluation(tasks_path=args.tasks, output_path=args.output, mode="llm")
+        )
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
     ablation = run_ablation(tasks_path=args.tasks, output_path=args.ablation_output)
     print(
         json.dumps(

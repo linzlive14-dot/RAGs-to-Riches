@@ -35,11 +35,21 @@ def _load_collection(filename: str, key: str) -> list[dict[str, Any]]:
     return payload[key]
 
 
-def _find(filename: str, key: str, field: str, value: str) -> dict[str, Any]:
+def _find(filename: str, key: str, field: str, value: str) -> dict[str, Any] | None:
     for record in _load_collection(filename, key):
         if record.get(field) == value:
             return record
-    raise ValueError(f"No synthetic record found for {field}={value!r}")
+    return None
+
+
+def _missing_record(field: str, value: str) -> dict[str, Any]:
+    """Return a negative finding the agent can explain, instead of raising."""
+
+    return {
+        "found": False,
+        "reason": f"No synthetic record found for {field}={value}.",
+        "synthetic": True,
+    }
 
 
 def _index() -> PolicyIndex:
@@ -73,7 +83,13 @@ def get_policy_section(source: str, section: str) -> dict[str, Any]:
 
     allowed = {path.name: path for path in POLICY_DIR.iterdir() if path.suffix in {".md", ".txt"}}
     if source not in allowed:
-        raise ValueError("Unknown policy source")
+        return {
+            "found": False,
+            "source": source,
+            "section": section,
+            "reason": f"Unknown policy source {source}.",
+            "synthetic": True,
+        }
     text = allowed[source].read_text(encoding="utf-8")
     headings = list(re.finditer(r"^##\s+(.+?)\s*$", text, flags=re.MULTILINE))
     for position, heading in enumerate(headings):
@@ -81,12 +97,19 @@ def get_policy_section(source: str, section: str) -> dict[str, Any]:
             continue
         end = headings[position + 1].start() if position + 1 < len(headings) else len(text)
         return {
+            "found": True,
             "source": source,
             "section": heading.group(1).strip(),
             "text": text[heading.end() : end].strip(),
             "synthetic": True,
         }
-    raise ValueError(f"Section {section!r} was not found in {source!r}")
+    return {
+        "found": False,
+        "source": source,
+        "section": section,
+        "reason": f"Section {section!r} was not found in {source}.",
+        "synthetic": True,
+    }
 
 
 @mcp.tool()
@@ -94,7 +117,9 @@ def lookup_employee_profile(employee_id: str) -> dict[str, Any]:
     """Look up the minimum synthetic employee profile needed for HR guidance."""
 
     employee = _find("employees.json", "employees", "employee_id", employee_id)
-    return {"employee": _public_employee(employee), "synthetic": True}
+    if employee is None:
+        return {**_missing_record("employee_id", employee_id), "employee_id": employee_id}
+    return {"found": True, "employee": _public_employee(employee), "synthetic": True}
 
 
 @mcp.tool()
@@ -102,7 +127,9 @@ def check_pto_balance(employee_id: str) -> dict[str, Any]:
     """Return a synthetic employee's current PTO balance."""
 
     balance = _find("pto_balances.json", "balances", "employee_id", employee_id)
-    return {"balance": balance, "synthetic": True}
+    if balance is None:
+        return {**_missing_record("employee_id", employee_id), "employee_id": employee_id}
+    return {"found": True, "balance": balance, "synthetic": True}
 
 
 @mcp.tool()
@@ -110,7 +137,9 @@ def lookup_benefits_status(employee_id: str) -> dict[str, Any]:
     """Return a synthetic employee's benefits enrollment status."""
 
     status = _find("benefits_status.json", "statuses", "employee_id", employee_id)
-    return {"benefits_status": status, "synthetic": True}
+    if status is None:
+        return {**_missing_record("employee_id", employee_id), "employee_id": employee_id}
+    return {"found": True, "benefits_status": status, "synthetic": True}
 
 
 @mcp.tool()
@@ -124,18 +153,39 @@ def check_policy_compliance(
 
     employee = _find("employees.json", "employees", "employee_id", employee_id)
     checks: list[dict[str, Any]] = []
+    if employee is None:
+        missing = _missing_record("employee_id", employee_id)
+        return {
+            "workflow": workflow,
+            "decision": "needs_clarification",
+            "checks": [],
+            "found": False,
+            "reason": missing["reason"],
+            "synthetic": True,
+        }
     if workflow == "remote_work":
         if not requested_location_id:
             return {
                 "workflow": workflow,
                 "decision": "needs_clarification",
                 "checks": [],
+                "found": True,
                 "reason": "requested_location_id is required",
                 "synthetic": True,
             }
         location = _find(
             "locations.json", "locations", "location_id", requested_location_id
         )
+        if location is None:
+            missing = _missing_record("location_id", requested_location_id)
+            return {
+                "workflow": workflow,
+                "decision": "needs_clarification",
+                "checks": [],
+                "found": False,
+                "reason": missing["reason"],
+                "synthetic": True,
+            }
         tenure_days = (date.today() - date.fromisoformat(employee["hire_date"])).days
         checks = [
             {"name": "180_day_tenure", "passed": tenure_days >= 180},
@@ -160,10 +210,21 @@ def check_policy_compliance(
                 "workflow": workflow,
                 "decision": "needs_clarification",
                 "checks": [],
+                "found": True,
                 "reason": "requested_hours must be greater than zero",
                 "synthetic": True,
             }
         balance = _find("pto_balances.json", "balances", "employee_id", employee_id)
+        if balance is None:
+            missing = _missing_record("employee_id", employee_id)
+            return {
+                "workflow": workflow,
+                "decision": "needs_clarification",
+                "checks": [],
+                "found": False,
+                "reason": missing["reason"],
+                "synthetic": True,
+            }
         covered = employee["employment_type"] in {"regular_full_time", "regular_part_time"}
         enough_balance = balance["available_hours"] >= requested_hours
         first_year = (date.today() - date.fromisoformat(employee["hire_date"])).days < 365
@@ -178,10 +239,17 @@ def check_policy_compliance(
             },
         ]
     decision = "eligible_for_review" if all(check["passed"] for check in checks) else "escalate"
+    failed = [check["name"] for check in checks if not check["passed"]]
     return {
         "workflow": workflow,
         "decision": decision,
         "checks": checks,
+        "found": True,
+        "reason": (
+            "Eligibility checks do not constitute manager or HR approval."
+            if decision == "eligible_for_review"
+            else f"These checks did not pass: {', '.join(failed)}."
+        ),
         "disclaimer": "Eligibility checks do not constitute manager or HR approval.",
         "synthetic": True,
     }
@@ -196,12 +264,16 @@ def create_mock_hr_ticket(
 ) -> dict[str, Any]:
     """Create a mock-only HR ticket after explicit user confirmation."""
 
-    _find("employees.json", "employees", "employee_id", employee_id)
+    if _find("employees.json", "employees", "employee_id", employee_id) is None:
+        missing = _missing_record("employee_id", employee_id)
+        return {"created": False, "found": False, "reason": missing["reason"], "synthetic": True}
     clean_summary = " ".join(summary.split())
     if not confirmed:
         return {
             "created": False,
+            "found": True,
             "confirmation_required": True,
+            "reason": "Mock ticket creation needs an explicit confirmation.",
             "proposed_action": {
                 "employee_id": employee_id,
                 "category": category,
@@ -210,7 +282,13 @@ def create_mock_hr_ticket(
             "synthetic": True,
         }
     if not 10 <= len(clean_summary) <= 200:
-        raise ValueError("summary must contain 10 to 200 characters")
+        return {
+            "created": False,
+            "found": True,
+            "rejected": True,
+            "reason": "summary must contain 10 to 200 characters",
+            "synthetic": True,
+        }
     tickets_path = DATA_DIR / "tickets.json"
     payload = json.loads(tickets_path.read_text(encoding="utf-8"))
     ticket_id = f"MOCK-HR-{len(payload['tickets']) + 1:03d}"
@@ -225,7 +303,7 @@ def create_mock_hr_ticket(
     }
     payload["tickets"].append(ticket)
     tickets_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    return {"created": True, "ticket": ticket, "synthetic": True}
+    return {"created": True, "found": True, "ticket": ticket, "synthetic": True}
 
 
 def main() -> None:
