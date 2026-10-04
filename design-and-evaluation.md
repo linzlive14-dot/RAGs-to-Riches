@@ -345,7 +345,9 @@ Results from 2026-09-30 are committed under `evaluation/results/`:
   tool-availability settings;
 - `http-latency.json`: `/health` and `/chat` timed over HTTP;
 - `archive/llm-report-partial-25-task-gold-set.json`: an earlier, partial
-  LLM-graded run on the previous 25-task gold set (see below).
+  LLM-graded run on the previous 25-task gold set.
+
+The graded run from 2026-10-04 is saved at `evaluation/results/llm-report.json`.
 
 ### Offline run
 
@@ -387,12 +389,69 @@ questions are where retrieval quality shows.
 
 ### LLM-graded run
 
-Pending. The earlier attempt on the previous gold set made one request per
-intent, answer, and judgment (about 90 for a full run) and stopped after 6
-model answers. With the call reductions above, a full run needs about 30
-requests on OpenRouter's free tier, and the result will be added here once it
-runs. In CI the graded run is a separate, manually dispatched job and does not gate
-deployment.
+Completed on 2026-10-04 with `dots-studio/dots-3-note-preview:free`. All 30
+tasks were scored. The run made 30 OpenRouter requests: 23 answers, 5 judge
+calls (five answers at a time), and 2 intent calls. The daily limit was not
+reached. In CI this graded run stays a separate, manually dispatched
+job and does not gate deployment.
+
+15 of 30 tasks passed. Seven replies use fixed wording (clarifications,
+refusals, and blocked requests) and all seven passed. Eight of the 23
+model-written answers passed.
+
+| Metric | Score |
+| --- | --- |
+| Tool selection accuracy (exact sequence) | 1.00 |
+| Workflow completion (expected status) | 1.00 |
+| Clarification accuracy | 1.00 |
+| Action-safety pass rate | 1.00 |
+| Groundedness (structural check and LLM judge) | 0.68 |
+| Citation validity (structural check and LLM judge) | 0.52 |
+| Answer match (mean share of key facts) | 0.77 |
+| Answers containing every key fact | 0.60 |
+
+| Category | Passed | Answer match |
+| --- | --- | --- |
+| workflow | 5/10 | 0.77 |
+| multi_document | 2/5 | 0.70 |
+| policy | 1/8 | 0.63 |
+| ambiguous | 3/3 | 1.00 |
+| out_of_scope | 2/2 | 1.00 |
+| unsafe | 2/2 | 1.00 |
+
+The model did not change tool use. Every task kept the expected tool sequence,
+status, clarification behavior, and action gate, including the confirmation
+hold on `pto-ticket-gated` and the pre-tool block on both unsafe requests.
+
+The 15 failures fall into three groups:
+
+- **Citation markers left unused.** A citation check passes only when every
+  marker the agent attached appears in the answer, and the judge also accepts
+  the cited claims. Six answers stated supported facts and the judge accepted
+  those claims, but the model cited only some of the attached markers:
+  `remote-unsupported-state`, `benefits-window-closed`, `policy-stolen-laptop`,
+  `policy-standing-desk`, `policy-payday`, and `policy-resignation-notice`.
+  `policy-payday` is also the retrieval miss described below.
+- **Unsupported details.** The judge marked eight answers ungrounded. The PTO
+  answers treated a notice window as already satisfied (`pto-full-balance`,
+  `pto-part-time`) or described an eligible request as failing its notice check
+  (`pto-ticket-gated`). `pto-over-balance` added a negative-PTO path the failed
+  balance check did not establish. `policy-thanksgiving` says the Friday after
+  Thanksgiving is both absent from the holiday list and an observed holiday.
+  `policy-remote-prerequisites` dropped the 180-day tenure rule and redirected
+  the question to accommodations. `policy-benefits-enrollment` cited only the
+  hire-date sentence and omitted the 30-day window. `policy-pto-notice` is the
+  same retrieval miss as the offline run: the model was given neighboring leave
+  and resignation rules, then said short-term PTO has no specific notice period.
+- **Key-fact phrasing.** `remote-eligible-ny` was judged grounded, with both
+  citation markers present, and answer match was 0.33. It says "eligible for
+  review" and "remote-work request" rather than the accepted phrases "not an
+  approval" and "remote work request".
+
+`policy-payday` is the other offline retrieval miss. The closest sentence is
+still the pay-card sentence, the judge accepted that sentence as grounded in
+the evidence, and answer match was 0 because "every other Friday" never
+appears.
 
 ### Latency
 
@@ -406,8 +465,12 @@ deployment.
 | Warm task in-process, 30 tasks | 15 ms p50, 54 ms p95 |
 | Warm `/chat` over HTTP, 60 requests | 16 ms p50, 52 ms p95 |
 
-These timings use deterministic answers; an LLM adds several seconds per
-model call (6.7 s p50 in the earlier partial run). The production index is
+The rows above are deterministic answers from the offline and HTTP runs. In
+the 2026-10-04 graded run, model-written answers took 3.4 s p50 and 5.5 s p95.
+A warm task across all 30 tasks, including the seven fixed replies, took 3.0 s
+p50 and 5.2 s p95. Rate-limit waiting is excluded from those figures; the run
+waited 12 s in total. Index build during that run was 13.8 s and MCP start-up
+was 0.36 s, in line with the cold samples above. The production index is
 built once at deploy time, not per request. On Render's free tier, the first
 request after the service sleeps adds 30–60 s; see `deployed.md`.
 
@@ -445,11 +508,15 @@ pages, at the low end of the rubric's 30–120 page range, rather than a
 production HR library. The fusion weights and the 0.62 similarity threshold
 were set on a 15-question development probe, and the 30-task gold set is small
 and synthetic, so strong scores do not establish real-world quality. Two policy
-questions still fail without an LLM. The embedding model raises the MCP
-server's memory to roughly 290–320 MB (measured on macOS), which leaves little
-headroom on Render's 512 MB free tier; `HR_RETRIEVAL_MODE=bm25` is the
-fallback, at the cost shown in the ablation. Graded answer quality depends on
-the configured model, and the graded run is still pending. The free model
-quota is shared between the deployed demo and the graded evaluation when they
-use the same key. Render free instances can cold-start, and the JSON ticket store is
-ephemeral and unsuitable for concurrent production writes.
+questions still fail without an LLM, and the graded run restates both of them.
+The embedding model raises the MCP server's memory to roughly 290–320 MB
+(measured on macOS), which leaves little headroom on Render's 512 MB free
+tier; `HR_RETRIEVAL_MODE=bm25` is the fallback, at the cost shown in the
+ablation. The 2026-10-04 graded run with
+`dots-studio/dots-3-note-preview:free` passed 15 of 30 tasks. Tool selection,
+workflow status, clarification, and action safety stayed at 1.00; the misses
+are unused citation markers, judge-rejected unsupported details, and key-fact
+phrasing. The free model quota is shared between the deployed demo and the
+graded evaluation when they use the same key. Render free instances can
+cold-start, and the JSON ticket store is ephemeral and unsuitable for
+concurrent production writes.
